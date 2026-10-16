@@ -6,11 +6,12 @@ import json
 import os
 import re
 import time
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import requests
 
 from .common import die, read_json, write_json
-from .local import ACTIVE_POLICY, DATA_HOME, RequestPolicy
+from .local import ACTIVE_POLICY, DATA_HOME, RequestPolicy, official_url
 
 try:
     from Crypto.Cipher import AES
@@ -70,6 +71,21 @@ class ChaoxingSession(requests.Session):
         # Response hooks run before requests follows a redirect.
         try:
             self.policy.check_response(response, stream=kwargs.get("stream", False))
+            # The account base endpoint advertises a legacy HTTP URL even over TLS.
+            # Upgrade only this observed same-host/path GET redirect before preparing it.
+            source = urlsplit(response.url)
+            target = urlsplit(urljoin(response.url, response.headers.get("Location", "")))
+            if (
+                300 <= response.status_code < 400
+                and response.request.method in {"GET", "HEAD"}
+                and source.scheme == "https"
+                and source.hostname == target.hostname == "i.chaoxing.com"
+                and source.path == target.path == "/base"
+                and target.scheme == "http"
+            ):
+                upgraded = urlunsplit(target._replace(scheme="https"))
+                official_url(upgraded)
+                response.headers["Location"] = upgraded
         except BaseException:
             response.close()
             raise
@@ -328,5 +344,22 @@ def cmd_check(args):
                 "htmlLen": len(response.text),
             },
             ensure_ascii=False,
+        )
+    )
+
+
+def cmd_request_status(args):
+    """Inspect only local pacing state, without sending an authenticated request."""
+    policy = RequestPolicy(str(args.session) + ".requests.json")
+    print(
+        json.dumps(
+            {
+                "localCooldownSeconds": max(
+                    0, int(policy.state.get("pause_until", 0) - time.time())
+                ),
+                "lastStop": policy.state.get("last_stop"),
+            },
+            ensure_ascii=False,
+            indent=2,
         )
     )

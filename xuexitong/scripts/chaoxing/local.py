@@ -2,6 +2,7 @@
 
 import math
 import os
+import re
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -13,6 +14,9 @@ from .common import read_json, write_json
 
 DATA_HOME = Path(os.environ.get("XUEXITONG_HOME", Path.home() / ".xuexitong")).expanduser()
 ACTIVE_POLICY = ContextVar("xuexitong_request_policy", default=None)
+MIN_REQUEST_INTERVAL = 8
+QUERY_REQUEST_LIMIT = 8
+BATCH_COOLDOWN = 60
 
 
 class RequestStopped(RuntimeError):
@@ -23,8 +27,20 @@ class _CaptchaPromptParser(HTMLParser):
     """Exclude dormant dialogs and scripts when looking for a captcha prompt."""
 
     _VOID_TAGS = {
-        "area", "base", "br", "col", "embed", "hr", "img", "input", "link",
-        "meta", "param", "source", "track", "wbr",
+        "area",
+        "base",
+        "br",
+        "col",
+        "embed",
+        "hr",
+        "img",
+        "input",
+        "link",
+        "meta",
+        "param",
+        "source",
+        "track",
+        "wbr",
     }
 
     def __init__(self):
@@ -61,10 +77,11 @@ class _CaptchaPromptParser(HTMLParser):
             self.text.append(data)
 
 
-def _has_captcha_prompt(body):
+def _visible_prompt_text(body):
     parser = _CaptchaPromptParser()
     parser.feed(body)
-    return "请输入验证码" in "".join(parser.text)
+    parser.close()
+    return "".join(parser.text)
 
 
 def official_url(url):
@@ -84,9 +101,13 @@ def official_url(url):
 
 
 class RequestPolicy:
-    def __init__(self, state_path=None, interval=2):
+    def __init__(self, state_path=None, interval=MIN_REQUEST_INTERVAL, max_requests=None):
         self.path = Path(state_path) if state_path else None
-        self.interval = max(2, interval)
+        self.interval = max(MIN_REQUEST_INTERVAL, interval)
+        if max_requests is not None and (not isinstance(max_requests, int) or max_requests < 1):
+            raise ValueError("请求预算必须是正整数")
+        self.max_requests = max_requests
+        self.request_count = 0
         self.state = read_json(self.path) if self.path and self.path.exists() else {}
         if not isinstance(self.state, dict):
             raise ValueError("请求状态文件应为 JSON 对象")
@@ -103,33 +124,74 @@ class RequestPolicy:
         official_url(url)
         remaining = self.state.get("pause_until", 0) - time.time()
         if remaining > 0:
+            code = self.state.get("last_stop", {}).get("reason", "unknown")
             raise RequestStopped(
-                f"访问已暂停，剩余约 {math.ceil(remaining)} 秒。请在官方页面完成验证后等待冷却。"
+                f"本地请求冷却中，剩余约 {math.ceil(remaining)} 秒，原因: {code}。"
+                "可用 request-status 查看记录；这不表示 App 一定无法访问。"
+            )
+        if self.max_requests is not None and self.request_count >= self.max_requests:
+            self.stop(
+                f"本次查询已达到 {self.max_requests} 个请求的本地上限，已停止并休息 60 秒。"
+                "请复用已有结果，缩小范围后分批继续，不要自动重跑整条命令。",
+                BATCH_COOLDOWN,
+                code="query_budget",
+                source="local",
             )
         delay = self.state.get("last_request_at", 0) + self.interval - time.time()
         if delay > 0:
             time.sleep(delay)
         self.state["last_request_at"] = time.time()
+        self.request_count += 1
+        if self.max_requests is not None and self.request_count == self.max_requests:
+            self._record_stop(BATCH_COOLDOWN, code="query_budget", source="local")
+        else:
+            self.persist()
+
+    def _record_stop(self, seconds, *, response=None, code="verification", source="http"):
+        self.state["pause_until"] = time.time() + seconds
+        parts = urlsplit(response.url) if response is not None else None
+        self.state["last_stop"] = {
+            "at": time.time(),
+            "reason": code,
+            "source": source,
+            "status": response.status_code if response is not None else None,
+            "host": parts.hostname if parts else None,
+            "path": re.sub(r"[0-9a-fA-F]{16,}|\d{5,}", "[id]", parts.path) if parts else None,
+        }
         self.persist()
 
-    def stop(self, reason, seconds=900):
-        self.state["pause_until"] = time.time() + seconds
-        self.persist()
+    def stop(self, reason, seconds=900, *, response=None, code="verification", source="http"):
+        self._record_stop(seconds, response=response, code=code, source=source)
         raise RequestStopped(reason)
 
     def check_response(self, response, *, stream=False):
         destination = urljoin(response.url, response.headers.get("Location", ""))
-        if "antispidershowverify.ac" in destination.lower():
-            self.stop("学习通要求官方验证，已停止请求并冷却 15 分钟。")
+        if "antispidershowverify.ac" in urlsplit(destination).path.lower():
+            self.stop(
+                "学习通跳转到官方验证，已在本地冷却 15 分钟。",
+                response=response,
+                code="verification_redirect",
+                source="redirect",
+            )
         if response.status_code == 429:
             retry_after = response.headers.get("Retry-After", "")
             cooldown = max(60, int(retry_after)) if retry_after.isdigit() else 60
-            self.stop(f"学习通限制了请求频率，已停止请求并冷却 {cooldown} 秒。", cooldown)
+            self.stop(
+                f"学习通返回 HTTP 429，已在本地冷却 {cooldown} 秒。",
+                cooldown,
+                response=response,
+                code="rate_limited",
+            )
         if response.status_code in (401, 403):
-            self.stop("学习通拒绝访问，请检查官方页面的登录和权限；已冷却 60 秒。", 60)
+            self.stop(
+                "学习通返回 HTTP 401/403，请检查登录、权限或接口上下文；本地冷却 60 秒。",
+                60,
+                response=response,
+                code="access_denied",
+            )
         content_type = response.headers.get("Content-Type", "").lower()
         if not stream or "text/html" in content_type:
-            body = response.text[:262144].lower()
+            body = _visible_prompt_text(response.text[:262144]).lower()
             is_login_page = (
                 urlsplit(response.url).hostname == "passport2.chaoxing.com"
                 and urlsplit(response.url).path == "/login"
@@ -137,15 +199,20 @@ class RequestPolicy:
             if any(
                 marker in body
                 for marker in (
-                    "antispidershowverify.ac",
                     "访问过于频繁",
                     "操作过于频繁",
                     "请完成安全验证",
                     "异常访问",
                     "拖动滑块",
                 )
-            ) or (not is_login_page and _has_captcha_prompt(body)):
-                self.stop("学习通返回验证或频控页面，已停止请求并冷却 15 分钟。")
+            ) or (not is_login_page and "请输入验证码" in body):
+                self.stop(
+                    "页面可见内容疑似要求验证或限流，已在本地冷却 15 分钟；"
+                    "请结合官方页面核对，识别结果不代表账号已被封禁。",
+                    response=response,
+                    code="visible_verification_prompt",
+                    source="page_heuristic",
+                )
         target = urlsplit(destination)
         source = urlsplit(response.url)
         if (
@@ -158,7 +225,7 @@ class RequestPolicy:
 
 
 @contextmanager
-def local_runtime(session_path, interval=2):
+def local_runtime(session_path, interval=MIN_REQUEST_INTERVAL, max_requests=None):
     """The OS releases the lock even when the agent process is interrupted."""
     path = Path(session_path).expanduser().resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -182,7 +249,9 @@ def local_runtime(session_path, interval=2):
             acquired = True
         except OSError:
             raise RequestStopped("同一会话已有本地命令在运行，请等待它结束。") from None
-        token = ACTIVE_POLICY.set(RequestPolicy(str(path) + ".requests.json", interval))
+        token = ACTIVE_POLICY.set(
+            RequestPolicy(str(path) + ".requests.json", interval, max_requests)
+        )
         try:
             yield
         finally:

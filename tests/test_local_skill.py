@@ -146,7 +146,31 @@ class LocalPolicyTests(unittest.TestCase):
                 patch("chaoxing.local.time.sleep") as sleep,
             ):
                 RequestPolicy(state, interval=0).before_request("https://i.chaoxing.com/base")
-            sleep.assert_called_once_with(1.5)
+            sleep.assert_called_once_with(7.5)
+
+    def test_query_budget_blocks_transport_and_is_shared_with_next_command(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "state.json"
+            policy = RequestPolicy(state, max_requests=2)
+            with patch("chaoxing.local.time.sleep"):
+                policy.before_request("https://i.chaoxing.com/base")
+                policy.before_request("https://i.chaoxing.com/base")
+                with self.assertRaises(RequestStopped):
+                    policy.before_request("https://i.chaoxing.com/base")
+                with self.assertRaises(RequestStopped):
+                    RequestPolicy(state).before_request("https://i.chaoxing.com/base")
+            self.assertEqual(policy.request_count, 2)
+            self.assertEqual(read_json(state)["last_stop"]["reason"], "query_budget")
+            self.assertEqual(read_json(state)["last_stop"]["source"], "local")
+
+    def test_budget_still_stops_after_a_slow_request_outlasts_local_cooldown(self):
+        policy = RequestPolicy(max_requests=1)
+        with patch("chaoxing.local.time.time", return_value=100):
+            policy.before_request("https://i.chaoxing.com/base")
+        with patch("chaoxing.local.time.time", return_value=200), self.assertRaises(RequestStopped):
+            policy.before_request("https://i.chaoxing.com/base")
+        self.assertEqual(policy.request_count, 1)
+
 
     def test_untrusted_urls_are_rejected(self):
         for url in (
@@ -196,13 +220,13 @@ class LocalPolicyTests(unittest.TestCase):
         url = "https://mooc1.chaoxing.com/mooc-ans/mooc2/work/dowork"
         for container in (
             '<div style="z-index: 1001;display: none;">{}</div>',
-            '<div hidden>{}</div>',
+            "<div hidden>{}</div>",
             '<div aria-hidden="true">{}</div>',
             '<div style="visibility: hidden">{}</div>',
-            '<template>{}</template>',
+            "<template>{}</template>",
         ):
             with self.subTest(container=container):
-                body = '<h1>作业作答</h1>' + container.format(
+                body = "<h1>作业作答</h1>" + container.format(
                     '<div><input placeholder="请输入验证码"></div>'
                 )
                 policy = RequestPolicy()
@@ -213,16 +237,64 @@ class LocalPolicyTests(unittest.TestCase):
         body = '<script>const prompt = "请输入验证码";</script><!-- 请输入验证码 -->'
         RequestPolicy().check_response(response("https://i.chaoxing.com/base", body=body))
 
+    def test_all_dormant_verification_markers_are_ignored(self):
+        for marker in ("访问过于频繁", "操作过于频繁", "请完成安全验证", "异常访问", "拖动滑块"):
+            body = (
+                f'<script>const msg="{marker}";</script><!-- {marker} -->'
+                f'<div style="display: none">{marker}</div><h1>作业作答</h1>'
+            )
+            RequestPolicy().check_response(response("https://mooc1.chaoxing.com/work", body=body))
+
+    def test_diagnostic_records_reason_without_auth_query_or_body(self):
+        policy = RequestPolicy()
+        with self.assertRaises(RequestStopped):
+            policy.check_response(
+                response("https://i.chaoxing.com/base?token=PRIVATE", body="请完成安全验证 PRIVATE")
+            )
+        record = policy.state["last_stop"]
+        self.assertEqual(record["reason"], "visible_verification_prompt")
+        self.assertEqual(record["source"], "page_heuristic")
+        self.assertNotIn("PRIVATE", str(policy.state))
+
+    def test_known_base_redirect_is_upgraded_before_transport(self):
+        url = "https://i.chaoxing.com/base"
+        redirect = response(url, 302, headers={"Location": "http://i.chaoxing.com/base?x=1&x=2"})
+        final = response("https://i.chaoxing.com/base?x=1&x=2", body="uid=synthetic")
+        with (
+            session.new_session() as client,
+            patch("chaoxing.local.time.sleep"),
+            patch("requests.adapters.HTTPAdapter.send", side_effect=[redirect, final]) as send,
+        ):
+            actual = client.get(url)
+        self.assertEqual(actual.status_code, 200)
+        self.assertEqual(send.call_args_list[1].args[0].url, "https://i.chaoxing.com/base?x=1&x=2")
+
+    def test_other_http_downgrades_remain_blocked(self):
+        for target in (
+            "http://other.chaoxing.com/base",
+            "http://i.chaoxing.com/other",
+            "http://user:pass@i.chaoxing.com/base",
+            "http://i.chaoxing.com:80/base",
+        ):
+            url = "https://i.chaoxing.com/base"
+            redirect = response(url, 302, headers={"Location": target})
+            with (
+                self.subTest(target=target),
+                session.new_session() as client,
+                patch("requests.adapters.HTTPAdapter.send", return_value=redirect) as send,
+            ):
+                with self.assertRaises(RequestStopped):
+                    client.get(url)
+            self.assertEqual(send.call_count, 1)
+
     def test_visible_captcha_prompt_still_stops_access(self):
         for body in (
             '<input placeholder="请输入验证码">',
-            '<p>请输入<span>验证码</span></p>',
+            "<p>请输入<span>验证码</span></p>",
             '<div hidden><input placeholder="请输入验证码"></div><p>请输入验证码</p>',
         ):
             with self.subTest(body=body), self.assertRaises(RequestStopped):
-                RequestPolicy().check_response(
-                    response("https://i.chaoxing.com/base", body=body)
-                )
+                RequestPolicy().check_response(response("https://i.chaoxing.com/base", body=body))
 
     def test_post_failure_is_not_replayed(self):
         with (
