@@ -1,0 +1,115 @@
+#!/usr/bin/env python3
+"""Legacy CLI entry point and import-compatible service exports."""
+
+# ruff: noqa: F401
+from chaoxing.cli import main
+from chaoxing.common import (
+    _iter_input_tags,
+    _question_id,
+    abs_url,
+    die,
+    extract_hidden_fields,
+    fmt_size,
+    hidden_by_id,
+    strip_tags,
+)
+from chaoxing.courses import (
+    SECTION_RE,
+    cmd_chapters,
+    cmd_exams,
+    cmd_topics,
+    course_middle,
+    find_course,
+    list_chapters,
+    list_courses,
+    open_course,
+    parse_chapters,
+    parse_exams,
+    parse_topics,
+    section_urls,
+)
+from chaoxing.homework import (
+    A11Y_RE,
+    DONE_WORDS,
+    IMG_EXT,
+    PENDING_WORDS,
+    TASK_LI_RE,
+    UPLOAD_DOMAIN,
+    _classify_status,
+    build_answer_html,
+    cmd_fetch,
+    cmd_pending,
+    cmd_template,
+    cmd_verify,
+    cmd_works,
+    course_works,
+    do_save_or_submit,
+    fetch_index,
+    fetch_stu_work,
+    format_answer,
+    parse_question,
+    parse_task_list,
+    post_answer,
+    probe_task,
+    resolve_dohomework,
+    upload_answer_file,
+    upload_raw,
+)
+from chaoxing.materials import (
+    DOWNLOAD_API,
+    MAT_ROW_RE,
+    MAT_TOTAL_RE,
+    cmd_download,
+    cmd_materials,
+    count_tree,
+    list_materials,
+    parse_materials,
+    print_tree,
+    walk_materials,
+)
+from chaoxing.overview import (
+    cmd_course,
+)
+from chaoxing.session import (
+    AES_KEY,
+    SESSION_FILE,
+    SKIP_COOKIE_KEYS,
+    UA,
+    attach_cookie,
+    cmd_session_info,
+    cookie_get,
+    do_login,
+    encode_account,
+    get_fid,
+    jwt_expiry,
+    load_session,
+    new_session,
+    save_session,
+    session_alive,
+)
+from chaoxing.student import (
+    ACTIVE_API,
+    KB_API,
+    NOTICE_API,
+    STUDY_DATA,
+    STUDY_STATS,
+    WRONGQ_DATA,
+    WRONGQ_PAGE,
+    _clean_ans,
+    cmd_notices,
+    cmd_schedule,
+    cmd_study,
+    cmd_todos,
+    cmd_wrongque,
+    fetch_activities,
+    fetch_notices,
+    fetch_schedule,
+    fetch_study_stats,
+    fetch_wrongque,
+    parse_notices,
+    parse_wrongque,
+    week_matches,
+)
+
+if __name__ == "__main__":
+    raise SystemExit(main())

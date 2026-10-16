@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+session_cookies.json*
+*.requests.json
+*.lock
+qr.png
+qr_status.json
+pending.json
+work.json
+answers.json
+downloads/
+output/
+outputs/

@@ -1,0 +1,4 @@
+interface:
+  display_name: "学习通本地助手"
+  short_description: "在本机扫码登录学习通，查询课程作业和课表、下载资料并处理用户指定的作答"
+  default_prompt: "使用 $xuexitong 查询我当前未提交的学习通作业。"
