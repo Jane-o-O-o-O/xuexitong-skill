@@ -4,7 +4,7 @@
 
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/downloads/)
 [![Agent Skill](https://img.shields.io/badge/Agent-Skill-167D72)](xuexitong/SKILL.md)
-[![CLI](https://img.shields.io/badge/CLI-26_commands-555555)](xuexitong/references/queries.md)
+[![CLI](https://img.shields.io/badge/CLI-28_commands-555555)](xuexitong/references/queries.md)
 
 把超星学习通的课程、作业、课表和资料接入你正在使用的 Agent。扫码登录后，可以直接用自然语言查询未交作业、查找课件、整理学习信息，也可以在明确授权后上传附件、暂存或提交作答。
 
@@ -20,7 +20,7 @@ Python 客户端在本机执行，Cookie 保存在本地。对话、模型调用
 | 课程与进度 | 课程列表、章节进度、学习统计、错题、考试和讨论列表 | 看一下数据结构的章节完成情况。 |
 | 课表与通知 | 当前周或指定周课表、通知筛选 | 查一下第 3 周的课表和未读作业通知。 |
 | 资料与下载 | 课程资料目录、按需展开文件夹、下载指定课件 | 找到这门课的实验指导，下载到本地。 |
-| 作业处理 | 读取题目、生成本地答案模板、上传附件、暂存、回读和交卷 | 把我确认过的实验报告上传并暂存，先不要交卷。 |
+| 作业处理 | 读取题目与题干附件、下载实验要求、生成本地答案模板、上传附件、暂存、回读和交卷 | 把我确认过的实验报告上传并暂存，先不要交卷。 |
 
 默认先读列表，再按需打开目标内容。`pending` 不会逐份探测题量，`todos` 不会默认扫描所有课程的活动和考试。
 
@@ -104,6 +104,9 @@ New-Item -ItemType Directory -Force .\outputs | Out-Null
 # 下载选中的一个文件
 & $python $cx download --course COURSE_ID --data-id DATA_ID --name "实验指导.pdf" --out .\outputs\materials
 
+# 下载 fetch 已读取到的题干附件
+& $python $cx download-attachments --work-json .\outputs\work.json --out .\outputs\attachments --result-json .\outputs\downloads.json
+
 # 指定课程的活动待办；考试待办使用 --deep
 & $python $cx todos --include-activities --course COURSE_ID --out .\outputs\todos.json
 
@@ -122,13 +125,17 @@ New-Item -ItemType Directory -Force .\outputs | Out-Null
 | 会话位置 | `~/.xuexitong/session_cookies.json`，其中 `~` 是当前用户主目录 |
 | 自定义目录 | 在启动前设置 `XUEXITONG_HOME` |
 | 指定会话 | `--session /absolute/path/session.json`；同一账号建议固定使用同一个文件 |
-| 请求间隔 | 至少 2 秒，同一会话文件的命令串行执行 |
+| 请求间隔 | 至少 8 秒，只可调慢；同一会话文件的命令串行执行 |
+| 读取范围 | 每条查询最多 8 个请求，达到预算后会话休息 60 秒；读题默认只读 1 页，通知默认取 5 条 |
+| 批量操作 | 展开作业先选定一份；下载先选定单个文件，批量需显式 `--all-files` 且仍受查询预算限制 |
 | 验证与限流 | 检测到验证后停止并冷却 15 分钟；HTTP 429 冷却至少 60 秒 |
 | 写操作 | 上传、暂存和交卷按用户授权执行；交卷需 `--confirm`，写请求不自动重放 |
 
 Cookie 是本地明文凭据，应保存在仅当前用户可访问的目录。不要将 Cookie、带鉴权参数的作答链接、作业快照或个人资料提交到仓库和公开 Issue。
 
 本地运行仍受学习通的登录、权限和风控规则约束。遇到验证时，在官方页面完成验证并等待冷却；请求结果不确定时先回读确认。这里的“本地”指客户端与会话，交给云端模型的对话或文件仍受宿主 Agent 的数据处理方式影响。
+
+上述限速和批次上限是客户端的保守设置，不能保证服务端永不要求验证。`request-status` 的 `source: local` / `reason: query_budget` 表示本地预算暂停，无需重新登录；等待后复用已得结果、按页码或对象 ID 继续。不要通过连续重跑整条命令扩大读取。扫码与写入流程保留 8 秒限速和互斥，不按查询预算截断。
 
 ## 常见问题
 
@@ -154,6 +161,15 @@ Cookie 是本地明文凭据，应保存在仅当前用户可访问的目录。�
 </details>
 
 <details>
+<summary><strong>App 能打开，为什么 CLI 提示安全验证？</strong></summary>
+
+直接调用接口仍可能受服务器风控影响，但 App 正常不代表接口被封禁，也可能是客户端识别错误。本版本忽略隐藏弹窗、脚本和注释里的验证码文案。用 `request-status` 查看本地冷却、HTTP 状态及原因来源：`page_heuristic` 表示页面提示识别，`redirect` 表示官方验证跳转，`http` 表示状态码。
+
+HTTP 401/403 也可能来自登录、权限或接口上下文，不统一称为验证码。真实验证时在官方页面处理并等待冷却；不要删状态或连续重试。
+
+</details>
+
+<details>
 <summary><strong>为什么目录、题量或查询结果可能不完整？</strong></summary>
 
 资料目录当前不自动翻页，递归有深度上限，抓题也有页数上限。页面改版、课程权限和部分接口失败同样可能影响结果。请检查结果中的错误与未展开标记；详细限制见查询和作业文档。
@@ -168,14 +184,16 @@ xuexitong/
   agents/openai.yaml       技能展示信息
   references/              按需读取的查询和作业说明
   scripts/
-    xuexitong.py            CLI 入口，支持 26 个子命令
+    xuexitong.py            CLI 入口，支持 28 个子命令
     qr_login.py             扫码登录
     chaoxing/              会话、课程、作业、资料和学习信息
     chaoxing_hw.py          历史 Python 导入兼容层
     requirements.txt       运行依赖
-tests/                     禁用真实 HTTP 的离线回归测试
+tests/                     离线回归，以及需显式运行的 live_smoke.py
 ```
 
 在已安装运行依赖的环境中执行 `python tests/run.py`。测试覆盖解析、会话存储、作业写入流程、查询范围、请求停止和本地互斥；离线通过不代表真实账号和当前在线接口已经验收。
+
+只有明确需要整段账号验证时，才运行 `python tests/live_smoke.py --course COURSE_ID --work-id WORK_ID --download`。它会依次检查登录、课程、作业列表、课名筛选、电脑端链接解析、读取一页题目及单个题干附件下载；请求串行且至少间隔 8 秒。它阻止所有非 GET/HEAD 请求，不调用上传、暂存或提交。`pageLimitReached` 表示只验收了本批页面，不宣称覆盖整份作业。日常排错优先复用已有输出、只运行目标命令。输出默认位于会话目录下独立的 `smoke-*` 文件夹，含私人作业链接，不加入仓库。
 
 开发环境、验证方式和变更约定见 [CONTRIBUTING.md](CONTRIBUTING.md)。发现问题或有功能建议，请使用 [Issues](https://github.com/Jane-o-O-o-O/xuexitong-skill/issues/new/choose)，附上脱敏后的复现信息。
