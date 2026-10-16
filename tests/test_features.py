@@ -189,12 +189,12 @@ class FeatureTests(unittest.TestCase):
             yield b"partial"
             raise OSError("connection interrupted")
 
-        response = Mock(status_code=200)
+        response = Mock(status_code=200, headers={})
         response.iter_content.side_effect = chunks
         self._check_download(response, b"existing", b"existing", "失败 1")
 
     def test_download_replaces_file_only_after_success(self):
-        response = Mock(status_code=200)
+        response = Mock(status_code=200, headers={})
         response.iter_content.return_value = [b"full", b"", b" content"]
         self._check_download(response, b"existing", b"full content", "成功 1")
 

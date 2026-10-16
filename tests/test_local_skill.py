@@ -73,7 +73,12 @@ class ScopeTests(unittest.TestCase):
         self.assertIsNone(export.call_args.args[1]["exams"])
 
     def test_large_scans_require_an_explicit_scope(self):
-        for argv in (["works"], ["todos", "--deep"], ["todos", "--include-activities"]):
+        for argv in (
+            ["works"],
+            ["todos", "--deep"],
+            ["todos", "--include-activities"],
+            ["download", "--course", "test", "--out", "unused"],
+        ):
             with self.subTest(argv=argv), contextlib.redirect_stderr(io.StringIO()):
                 with self.assertRaises(SystemExit) as stopped:
                     cli.main(argv)
@@ -171,6 +176,30 @@ class LocalPolicyTests(unittest.TestCase):
             policy.before_request("https://i.chaoxing.com/base")
         self.assertEqual(policy.request_count, 1)
 
+    def test_cli_applies_query_budget_and_keeps_login_polling_paced(self):
+        for argv, expected in [(["courses"], 8), (["qr-login"], None)]:
+            with (
+                self.subTest(argv=argv),
+                patch.object(cli, "cmd_courses"),
+                patch.object(cli, "cmd_qr_login"),
+                patch.object(cli, "local_runtime") as runtime,
+            ):
+                cli.main(argv)
+            self.assertEqual(runtime.call_args.kwargs["max_requests"], expected)
+            self.assertEqual(runtime.call_args.args[1], 8)
+
+    def test_pending_will_not_expand_multiple_works(self):
+        args = cli.build_parser().parse_args(["pending", "--resolve"])
+        tasks = [{"taskRefId": str(i), "status": "未提交"} for i in range(2)]
+        with (
+            patch.object(homework, "load_session"),
+            patch.object(homework, "fetch_stu_work", return_value=(tasks, "")),
+            patch.object(homework, "resolve_dohomework") as resolve,
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            with self.assertRaises(SystemExit):
+                homework.cmd_pending(args)
+        resolve.assert_not_called()
 
     def test_untrusted_urls_are_rejected(self):
         for url in (

@@ -51,7 +51,7 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(args.cmd, name)
                 self.assertTrue(callable(args.handler))
                 self.assertEqual(args.session, session.SESSION_FILE)
-                self.assertEqual(args.sleep, 2)
+                self.assertEqual(args.sleep, 8)
         self.assertTrue(parser.parse_args(["save", *required["save"]]).temp_save)
         self.assertFalse(parser.parse_args(["submit", *required["submit"]]).temp_save)
 
@@ -68,6 +68,7 @@ class CliTests(unittest.TestCase):
                 ["pending", "--max-index", "0"],
                 ["schedule", "--week", "0"],
                 ["materials", "--course", "test", "--max-depth", "-1"],
+                ["fetch", "--dohomework-url", "unused", "--start-index", "-1"],
             ):
                 with self.subTest(arguments=arguments), self.assertRaises(SystemExit) as error:
                     cli.build_parser().parse_args(arguments)
@@ -90,6 +91,13 @@ class CliTests(unittest.TestCase):
         with redirect_stdout(io.StringIO()) as output:
             self.assertEqual(cli.main([]), 0)
         self.assertIn("pending", output.getvalue())
+
+    def test_defaults_read_one_page_and_few_notices(self):
+        parser = cli.build_parser()
+        fetch = parser.parse_args(["fetch", "--dohomework-url", "unused"])
+        self.assertEqual((fetch.start_index, fetch.max_index), (0, 1))
+        self.assertEqual(parser.parse_args(["pending"]).max_index, 1)
+        self.assertEqual(parser.parse_args(["notices"]).limit, 5)
 
 
 class QrTests(unittest.TestCase):

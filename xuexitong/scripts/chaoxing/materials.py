@@ -8,7 +8,7 @@ import time
 from contextlib import closing
 from urllib.parse import quote
 
-from .common import save_output, write_text
+from .common import die, save_output, write_text
 from .courses import find_course
 from .local import RequestStopped
 from .session import load_session
@@ -170,8 +170,55 @@ def _safe_filename(name, fallback="download"):
     return safe
 
 
+def download_file(s, url, path):
+    """Keep prior output intact on a refused, empty, or interrupted download."""
+    directory = os.path.dirname(os.path.abspath(path))
+    temp_path = None
+    try:
+        with closing(
+            s.get(
+                url,
+                timeout=180,
+                allow_redirects=True,
+                stream=True,
+                headers={"Referer": "https://pan-yz.chaoxing.com/"},
+            )
+        ) as response:
+            if response.status_code != 200:
+                raise RuntimeError(f"HTTP {response.status_code}")
+            kind = response.headers.get("Content-Type", "").lower()
+            disposition = response.headers.get("Content-Disposition", "").lower()
+            if "attachment" not in disposition and any(
+                value in kind for value in ("text/html", "application/xhtml", "application/json")
+            ):
+                raise RuntimeError("下载返回页面或错误信息，未保存为附件")
+            size = 0
+            with tempfile.NamedTemporaryFile(
+                dir=directory, prefix=".download-", suffix=".part", delete=False
+            ) as output:
+                temp_path = output.name
+                for chunk in response.iter_content(65536):
+                    output.write(chunk)
+                    size += len(chunk)
+            length = response.headers.get("Content-Length", "")
+            if not size or (
+                length.isdigit()
+                and not response.headers.get("Content-Encoding")
+                and size != int(length)
+            ):
+                raise RuntimeError("下载为空或长度不符，未替换本地文件")
+        os.replace(temp_path, path)
+        temp_path = None
+        return size
+    finally:
+        if temp_path is not None:
+            os.unlink(temp_path)
+
+
 def cmd_download(args):
     """下载课程资料。downloadData 走 302 到 d0.cldisk.com, 必须带 pan-yz Referer。"""
+    if not args.data_id and not getattr(args, "all_files", False):
+        die("请用 --data-id 选择单个文件；批量下载需显式加 --all-files")
     s = load_session(args.session)
     c = find_course(s, args.course)
     if args.data_id:
@@ -188,29 +235,8 @@ def cmd_download(args):
             f"{DOWNLOAD_API}?dataId={it['dataId']}&classId={c['clazzId']}"
             f"&cpi={c['cpi']}&courseId={c['courseId']}&ut=s"
         )
-        temp_path = None
         try:
-            with closing(
-                s.get(
-                    url,
-                    timeout=180,
-                    allow_redirects=True,
-                    stream=True,
-                    headers={"Referer": "https://pan-yz.chaoxing.com/"},
-                )
-            ) as r:
-                if r.status_code != 200:
-                    raise RuntimeError(f"HTTP {r.status_code}")
-                n = 0
-                with tempfile.NamedTemporaryFile(
-                    dir=args.out, prefix=".download-", suffix=".part", delete=False
-                ) as f:
-                    temp_path = f.name
-                    for chunk in r.iter_content(65536):
-                        f.write(chunk)
-                        n += len(chunk)
-            os.replace(temp_path, path)
-            temp_path = None
+            n = download_file(s, url, path)
             print(f"  [ok] {safe}  {n / 1024:.0f} KB")
             ok += 1
         except RequestStopped:
@@ -218,8 +244,5 @@ def cmd_download(args):
         except Exception as e:
             print(f"  [x] {safe}  {type(e).__name__}: {e}")
             fail += 1
-        finally:
-            if temp_path is not None:
-                os.unlink(temp_path)
         time.sleep(args.sleep)
     print(f"\n下载完成: 成功 {ok}  失败 {fail}  -> {os.path.abspath(args.out)}")

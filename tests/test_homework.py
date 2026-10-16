@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 from urllib.parse import parse_qs, urlparse
 
@@ -147,6 +148,79 @@ class HomeworkSubmissionTests(unittest.TestCase):
 
 
 class HomeworkParsingTests(unittest.TestCase):
+    def test_pc_rows_use_title_and_p_status_without_countdown_or_tools(self):
+        html = """
+        <li data='/mooc-ans/mooc2/work/task?workId=1&amp;courseId=10'>
+          <div class='right-content'><p class='overHidden2 fl'>分割实验</p>
+          <p class='status fl'>待批阅</p><a title='查看分析'>智能分析</a></div>
+          <div class='time notOver'>剩余46小时</div></li>
+        <li data='/work?workId=2'><p class='overHidden2 fl'>下一次实验</p>
+          <p class='status fl'>未开始</p></li>
+        """
+        rows = homework.parse_course_works(html)
+        self.assertEqual(
+            [(r["title"], r["status"], r["statusText"]) for r in rows],
+            [("分割实验", "submitted", "待批阅"), ("下一次实验", "pending", "未开始")],
+        )
+
+    def test_nested_stem_preserves_content_images_and_attachments(self):
+        attach = homework.build_answer_html("synthetic-object", "实验.docx", "docx")
+        source = (
+            "<input id=questionId value=12>"
+            '<div class="ans-cc extra"><div>第一段<div>第二段</div>第三段</div>'
+            '<img src="/sample.png" alt="图示">' + attach + "<p>末段</p></div>"
+        )
+        question = homework.parse_question(source)
+        self.assertIn("末段", question["stem"])
+        self.assertIn("第三段", question["stemHtml"])
+        self.assertEqual(question["images"], [{"src": "/sample.png", "alt": "图示"}])
+        self.assertEqual(question["attachments"][0]["objectId"], "synthetic-object")
+        self.assertEqual(question["attachments"][0]["name"], "实验.docx")
+        self.assertEqual(question["contentWarnings"], [])
+
+    def test_attachment_only_question_is_not_empty(self):
+        source = (
+            "<input id=questionId value=12><div class=ans-cc>"
+            + homework.build_answer_html("obj", "notes.docx", "docx")
+            + "</div>"
+        )
+        question = homework.parse_question(source)
+        self.assertEqual(question["stem"], "")
+        self.assertEqual(len(question["attachments"]), 1)
+        self.assertEqual(question["contentWarnings"], [])
+
+    def test_unknown_or_broken_embeds_are_reported(self):
+        source = (
+            "<input id=questionId value=12><div class=ans-cc>"
+            "<iframe module=insertAttach name=broken></iframe>"
+            '<iframe src="/unknown"></iframe></div>'
+        )
+        question = homework.parse_question(source)
+        self.assertEqual(question["attachments"], [])
+        self.assertEqual(len(question["contentWarnings"]), 2)
+
+    def test_option_values_are_paired_with_their_labels(self):
+        question = homework.parse_question(
+            "<input id=questionId value=12><div class=ans-cc>选择</div>"
+            "<label><input type=radio value=A>区域生长</label>"
+            "<input id=option-b type=radio value=B><label for=option-b>分水岭</label>"
+        )
+        self.assertEqual(
+            [(o["value"], o["label"]) for o in question["options"]],
+            [("A", "区域生长"), ("B", "分水岭")],
+        )
+
+    def test_mobile_task_ids_survive_truncated_course_names(self):
+        rows = homework.parse_task_list(
+            "<li data='/mtaskmsgspecial?taskrefId=1&amp;courseId=10&amp;clazzId=20'>"
+            '<p>实验</p><span class="status fl">未提交</span>《智能制造...》'
+            '<span aria-label="作业名称实验作业状态未提交所属课程智能制造创新思维方法'
+            '剩余时间2天"></span></li>'
+        )
+        self.assertEqual(rows[0]["course"], "智能制造创新思维方法")
+        self.assertEqual((rows[0]["courseId"], rows[0]["clazzId"]), ("10", "20"))
+        self.assertEqual(rows[0]["remain"], "2天")
+
     def test_course_status_and_title_stay_within_each_row(self):
         html = (
             '<li data="/work?workId=1"><p title="A">A</p>已完成</li>'
@@ -222,6 +296,169 @@ class HomeworkParsingTests(unittest.TestCase):
             '<p class="overHidden2">B</p><p class="status">已完成</p></div>'
         )
         self.assertEqual([row["status"] for row in courses.parse_exams(html)], ["", "已完成"])
+
+
+class HomeworkResolutionTests(unittest.TestCase):
+    def test_pc_url_resolves_only_matching_work_course_and_class(self):
+        client = Mock()
+        mobile = "https://mooc1-api.chaoxing.com/mtaskmsgspecial?taskrefId=1&courseId=10&clazzId=20"
+        do_url = (
+            "https://mooc1-api.chaoxing.com/mooc-ans/work/phone/"
+            "doHomeWork?workId=1&courseId=10&classId=20&enc=synthetic"
+        )
+        client.get.return_value = SimpleNamespace(text=f'<a href="{do_url}">作答</a>', url=mobile)
+        tasks = [
+            {"taskRefId": "1", "courseId": "10", "clazzId": "20", "taskUrl": mobile},
+            {"taskRefId": "1", "courseId": "99", "clazzId": "20", "taskUrl": "wrong"},
+        ]
+        with patch.object(homework, "fetch_stu_work", return_value=(tasks, "")):
+            actual = homework.resolve_dohomework(
+                client,
+                "https://mooc1.chaoxing.com/mooc-ans/mooc2/work/task?workId=1&courseId=10&classId=20",
+            )
+        self.assertEqual(actual, do_url)
+        self.assertEqual(client.get.call_args.args[0], mobile)
+
+    def test_pc_link_without_unique_match_stops_before_opening_work(self):
+        client = Mock()
+        with patch.object(homework, "fetch_stu_work", return_value=([], "")):
+            with self.assertRaises(ValueError):
+                homework.resolve_dohomework(
+                    client, "https://mooc1.chaoxing.com/mooc-ans/mooc2/work/task?workId=1"
+                )
+        client.get.assert_not_called()
+
+    def test_mismatched_work_link_is_rejected(self):
+        client = Mock()
+        client.get.return_value = SimpleNamespace(
+            url="https://mooc1-api.chaoxing.com/mtaskmsgspecial",
+            text='<a href="/work/phone/doHomeWork?courseId=10&workId=999">作答</a>',
+        )
+        with self.assertRaises(ValueError):
+            homework.resolve_dohomework(
+                client, "https://mooc1-api.chaoxing.com/mtaskmsgspecial?taskrefId=1&courseId=10"
+            )
+
+    def test_pending_filter_uses_authoritative_course_id(self):
+        from chaoxing.cli import build_parser
+
+        args = build_parser().parse_args(["pending", "--course", "智能制造创新思维方法"])
+        task = {
+            "taskRefId": "1",
+            "name": "实验",
+            "status": "未提交",
+            "course": "智能制造...",
+            "courseId": "10",
+            "remain": "",
+            "taskUrl": "unused",
+        }
+        with (
+            patch.object(homework, "load_session"),
+            patch.object(
+                homework,
+                "find_course",
+                return_value={"courseId": "10", "name": "智能制造创新思维方法"},
+            ),
+            patch.object(homework, "fetch_stu_work", return_value=([task], "")),
+            patch.object(homework, "save_output") as save,
+            redirect_stdout(io.StringIO()),
+        ):
+            homework.cmd_pending(args)
+        self.assertEqual(save.call_args.args[1][0]["course"], "智能制造创新思维方法")
+
+
+class HomeworkFetchTests(unittest.TestCase):
+    def fetch(self, pages, max_index=5, start_index=0):
+        from chaoxing.cli import build_parser
+
+        with tempfile.TemporaryDirectory() as directory:
+            args = build_parser().parse_args(
+                [
+                    "fetch",
+                    "--dohomework-url",
+                    "unused",
+                    "--out",
+                    str(Path(directory) / "work.json"),
+                    "--max-index",
+                    str(max_index),
+                    "--start-index",
+                    str(start_index),
+                ]
+            )
+            args.sleep = 0
+            with (
+                patch.object(homework, "load_session"),
+                patch.object(homework, "fetch_index", side_effect=pages),
+                redirect_stdout(io.StringIO()),
+            ):
+                homework.cmd_fetch(args)
+            return read_json(args.out)
+
+    def test_repeated_last_question_finishes_without_duplicate_content(self):
+        data = self.fetch([page("1")] * 3)
+        self.assertEqual(len(data["questions"]), 1)
+        self.assertEqual(data["stopReason"], "repeated_question")
+        self.assertFalse(data["limitReached"])
+
+    def test_page_limit_is_not_reported_as_complete(self):
+        data = self.fetch([page("1"), page("2")], max_index=2)
+        self.assertEqual(len(data["questions"]), 2)
+        self.assertTrue(data["limitReached"])
+
+    def test_closed_entry_records_no_question(self):
+        data = self.fetch(["<html>作业已过时效</html>"])
+        self.assertEqual(data["questions"], [])
+        self.assertEqual(data["stopReason"], "no_question")
+
+    def test_next_batch_starts_at_requested_page(self):
+        data = self.fetch([page("12")], max_index=1, start_index=7)
+        self.assertEqual(data["startIndex"], 7)
+        self.assertEqual(data["nextIndex"], 8)
+        self.assertEqual(data["questions"][0]["index"], 7)
+
+    def test_stopped_read_preserves_completed_pages_and_resume_index(self):
+        from chaoxing.cli import build_parser
+        from chaoxing.local import RequestStopped
+
+        with tempfile.TemporaryDirectory() as directory:
+            destination = str(Path(directory) / "work.json")
+            args = build_parser().parse_args(
+                [
+                    "fetch",
+                    "--dohomework-url",
+                    "unused",
+                    "--out",
+                    destination,
+                    "--max-index",
+                    "5",
+                    "--start-index",
+                    "7",
+                ]
+            )
+            args.sleep = 0
+            with (
+                patch.object(homework, "load_session"),
+                patch.object(
+                    homework, "fetch_index", side_effect=[page("12"), RequestStopped("budget")]
+                ),
+                redirect_stdout(io.StringIO()),
+                self.assertRaises(RequestStopped),
+            ):
+                homework.cmd_fetch(args)
+            data = read_json(destination)
+            self.assertEqual(data["nextIndex"], 8)
+            self.assertEqual(data["stopReason"], "request_stopped")
+            self.assertEqual([q["questionId"] for q in data["questions"]], ["12"])
+
+    def test_partial_cache_does_not_trigger_a_scan_from_page_zero(self):
+        work = {"questions": [{"questionId": "12", "index": 7}]}
+        with (
+            patch.object(homework, "fetch_index", return_value=page("12")) as fetch,
+            patch.object(homework.time, "sleep"),
+        ):
+            fields = homework.collect_question_fields(None, "unused", {"12"}, work=work)
+        self.assertIn("12", fields)
+        fetch.assert_called_once_with(None, "unused", 7)
 
 
 if __name__ == "__main__":
