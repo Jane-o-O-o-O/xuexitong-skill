@@ -46,8 +46,8 @@ def positive_int(value):
 
 
 def build_parser():
-    parser = argparse.ArgumentParser(description="超星学习通本地 API 客户端")
-    parser.add_argument("--session", default=SESSION_FILE, help="cookie 落盘路径")
+    parser = argparse.ArgumentParser(description="学习通本地助手：课程、作业、资料与学习信息")
+    parser.add_argument("--session", default=SESSION_FILE, help="本地会话文件路径")
     parser.add_argument("--sleep", type=nonnegative_float, default=2, help="请求间隔秒，最低 2 秒")
     sub = parser.add_subparsers(dest="cmd")
 
@@ -55,25 +55,25 @@ def build_parser():
         sp = sub.add_parser(name, help=help_text)
         sp.set_defaults(handler=handler)
         if course:
-            sp.add_argument("--course", required=True, help="课名关键词")
+            sp.add_argument("--course", required=True, help="课名关键词或 courseId")
         if out is not None:
             sp.add_argument("--out", default=out)
         if html:
             sp.add_argument("--save-html", default="")
         return sp
 
-    sp = command("login", "账号密码登录", cmd_login)
+    sp = command("login", "备用账号密码登录", cmd_login)
     sp.add_argument("--phone", required=True)
     sp.add_argument("--password", default="", help="留空时在本地终端隐式输入")
-    sp = command("set-cookie", "手工喂浏览器 cookie 字符串", cmd_set_cookie)
+    sp = command("set-cookie", "从本机浏览器导入登录态", cmd_set_cookie)
     cookies = sp.add_mutually_exclusive_group(required=True)
     cookies.add_argument("--cookie", default="")
     cookies.add_argument("--cookie-file", default="", help="本地 Cookie 文本文件")
     command("check", "检查登录态", cmd_check)
-    command("session-info", "看登录态还剩多久过期", cmd_session_info)
-    command("courses", "列课程 (courseId/clazzId/cpi)", cmd_courses, out="")
+    command("session-info", "查看本地会话到期信息", cmd_session_info)
+    command("courses", "列出课程及其 ID", cmd_courses, out="")
 
-    sp = command("works", "按课程列作业 + 提交状态", cmd_works, out="")
+    sp = command("works", "查询指定课程的作业及状态", cmd_works, out="")
     sp.add_argument("--course", default="", help="课名关键词或 courseId")
     sp.add_argument("--all-courses", action="store_true", help="显式扫描全部课程")
     sp.add_argument("--pending-only", action="store_true")
@@ -92,13 +92,13 @@ def build_parser():
     sp.add_argument("--keyword", default="")
     sp = command("schedule", "课表", cmd_schedule, out="")
     sp.add_argument("--week", type=positive_int, default=None, help="查第 N 周, 默认当前周")
-    sp = command("todos", "待办汇总: 未提交作业 + 未完成活动", cmd_todos, out="")
-    sp.add_argument("--deep", action="store_true", help="连带逐课扫未完成的考试(慢)")
+    sp = command("todos", "查询未交作业，按需添加活动和考试", cmd_todos, out="")
+    sp.add_argument("--deep", action="store_true", help="添加所选课程的未完成考试")
     sp.add_argument("--limit", type=nonnegative_int, default=30)
     sp.add_argument("--course", default="", help="活动/考试限定课程")
-    sp.add_argument("--include-activities", action="store_true")
-    sp.add_argument("--all-courses", action="store_true")
-    sp = command("download", "下载课程资料", cmd_download, course=True)
+    sp.add_argument("--include-activities", action="store_true", help="添加所选课程的未完成活动")
+    sp.add_argument("--all-courses", action="store_true", help="显式扫描全部课程")
+    sp = command("download", "下载课程资料到本地", cmd_download, course=True)
     sp.add_argument("--out", required=True, help="保存目录")
     sp.add_argument("--data-id", default="", help="只下一个文件")
     sp.add_argument("--name", default="")
@@ -109,35 +109,40 @@ def build_parser():
         ("chapters", "章节树 + 任务点进度", cmd_chapters),
     ):
         command(name, help_text, handler, course=True, out="", html=True)
-    command("course", "一门课的全貌 (章节+作业+资料)", cmd_course, course=True)
-    sp = command("materials", "看课程资料区", cmd_materials, course=True, out="", html=True)
-    sp.add_argument("--tree", action="store_true", help="递归展开整个目录树")
+    command("course", "组合查询课程的多个板块", cmd_course, course=True)
+    sp = command("materials", "查询课程资料目录", cmd_materials, course=True, out="", html=True)
+    sp.add_argument("--tree", action="store_true", help="递归展开目录，受深度上限影响")
     sp.add_argument("--max-depth", type=nonnegative_int, default=4)
     for flag in ("data-id", "data-name", "parent", "enc"):
         sp.add_argument(f"--{flag}", default="")
 
     sp = command(
-        "pending", "列未提交作业 (手机端 task 入口)", cmd_pending, out="pending.json", html=True
+        "pending", "列出未交作业，默认只读列表", cmd_pending, out="pending.json", html=True
     )
     sp.add_argument("--max-index", type=positive_int, default=30)
     sp.add_argument("--all", action="store_true", help="包含待批阅/已完成")
     sp.add_argument("--course", default="", help="按课名过滤全局作业列表")
     sp.add_argument("--resolve", action="store_true", help="解析所选作业链接及题量，增加请求")
-    sp = command("resolve", "仅解析一份作业的作答链接", cmd_resolve)
+    sp = command("resolve", "解析一份作业的作答链接", cmd_resolve)
     sp.add_argument("--task-url", required=True)
-    sp = command("fetch", "抓某份作业的题目", cmd_fetch, out="work.json", html=True)
+    sp = command("fetch", "读取指定作业题目", cmd_fetch, out="work.json", html=True)
     sp.add_argument("--dohomework-url", required=True)
     sp.add_argument("--max-index", type=positive_int, default=30)
-    sp = command("template", "生成答案模板", cmd_template, out="answers.json")
+    sp = command("template", "生成本地答案模板", cmd_template, out="answers.json")
     sp.add_argument("--work-json", required=True)
-    sp = command("upload", "上传本地文件, 返回 objectid 与答案 HTML", cmd_upload)
+    sp = command("upload", "上传一个本地附件，返回 objectId 与答案 HTML", cmd_upload)
     sp.add_argument("--dohomework-url", required=True)
     sp.add_argument("--file", required=True)
-    sp = command("verify", "回读服务器上已存的作答内容 (交卷前确认)", cmd_verify)
+    sp = command("verify", "回读已存作答与附件", cmd_verify)
     sp.add_argument("--dohomework-url", required=True)
     sp.add_argument("--work-json", default="")
     for name, temp in (("save", True), ("submit", False)):
-        sp = command(name, "暂存" if temp else "交卷", cmd_save_or_submit, out="")
+        sp = command(
+            name,
+            "暂存作答到学习通" if temp else "提交作业，需要 --confirm",
+            cmd_save_or_submit,
+            out="",
+        )
         sp.add_argument("--dohomework-url", required=True)
         sp.add_argument("--answers", required=True)
         sp.add_argument("--work-json", default="")

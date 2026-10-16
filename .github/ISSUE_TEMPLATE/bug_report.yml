@@ -1,0 +1,37 @@
+name: 问题反馈
+description: 报告安装、登录、查询、下载或作业操作中遇到的问题。
+title: "[Bug] "
+body:
+  - type: markdown
+    attributes:
+      value: 请提供可复现的信息，并删除 Cookie、密码、学号、手机号和链接中的鉴权参数。不要上传原始二维码、会话或个人作业文件。
+  - type: textarea
+    id: environment
+    attributes:
+      label: 运行环境
+      description: 操作系统、Python 版本、使用的 Agent（或直接使用 CLI）、仓库版本或提交号。
+      placeholder: "Windows 11 / Python 3.13 / Codex / main"
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤
+      description: 从哪个入口执行了什么操作？请贴脱敏后的命令或具体步骤。
+      placeholder: "1. 执行……\n2. 随后出现……"
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期结果
+      description: 你期望获得什么结果？
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际结果与错误信息
+      description: 贴出脱敏后的输出；如官方页面可正常操作，也请说明。
+    validations:
+      required: true

@@ -1,4 +1,4 @@
 interface:
   display_name: "学习通本地助手"
-  short_description: "在本机扫码登录学习通，查询课程作业和课表、下载资料并处理用户指定的作答"
-  default_prompt: "使用 $xuexitong 查询我当前未提交的学习通作业。"
+  short_description: "让本地 Agent 查询学习通课程、作业和课表，下载资料并处理授权的作答"
+  default_prompt: "使用 $xuexitong 查看未提交的作业，列出课程、作业名称和剩余时间。"

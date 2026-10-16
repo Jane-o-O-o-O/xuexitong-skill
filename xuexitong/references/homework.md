@@ -1,13 +1,28 @@
-# 作业读取、暂存与提交
+# 作业与附件
 
-所有命令的入口都是 `python "SKILL_DIR/scripts/xuexitong.py"`。下文的 `URL` 是同一份作业最新解析出的 `doHomeWorkUrl`，不能从别的账户或课程复用。文件路径使用绝对路径。
+[技能入口](../SKILL.md) · [查询与下载](queries.md)
 
-## 读取与本地草稿
+## 调用约定
 
-1. `pending --out PATH/pending.json` 列表；定位用户指定作业，检查课程、名称、状态及剩余时间。已截止或不确定的作业先在官方页面确认。
-2. `resolve --task-url TASK_URL` 得到该份作业的 `doHomeWorkUrl`。
-3. `fetch --dohomework-url URL --max-index 30 --out PATH/work.json` 逐页读取题目。题量上限是边界，不保证覆盖更多题；发现抓取不全时说明范围。超范围页可能重复最后一题，客户端按题号去重。
-4. `template --work-json PATH/work.json --out PATH/answers.json` 生成本地 `{题号: 答案}` 映射。编辑此文件只产生本地草稿，不触发保存或交卷。
+下面的完整命令使用 `python "SKILL_DIR/scripts/xuexitong.py"` 作为入口。替换大写占位符，文件路径使用绝对路径，先创建 `OUT_DIR`。
+
+`TASK_URL` 来自所选作业的 `taskUrl`；`WORK_URL` 来自该份作业最新解析出的 `doHomeWorkUrl`。所有步骤绑定同一账户和作业，不能跨账户、跨作业复用链接或题号。
+
+## 读取题目与本地草稿
+
+先用 `pending` 列表核对课程、作业名、状态和剩余时间，再对用户选择的那一份作业执行：
+
+```text
+python "SKILL_DIR/scripts/xuexitong.py" resolve --task-url "TASK_URL"
+python "SKILL_DIR/scripts/xuexitong.py" fetch --dohomework-url "WORK_URL" --max-index 30 --out "OUT_DIR/work.json"
+python "SKILL_DIR/scripts/xuexitong.py" template --work-json "OUT_DIR/work.json" --out "OUT_DIR/answers.json"
+```
+
+`resolve` 的输出用于替换后两条命令中的 `WORK_URL`。`fetch` 按题号去重；超范围页可能重复最后一题。`--max-index` 是抓取页数上限，不保证覆盖更多题，达到上限或题目缺失时说明实际范围。
+
+`work.json` 保留题目和当前作业上下文。`template` 生成 `{题号: 答案}` 映射，只写本地文件，不会暂存或交卷。
+
+## 答案格式
 
 ```json
 {
@@ -18,24 +33,49 @@
 }
 ```
 
-题号必须来自当前 `work.json`；示例题号与答案无实际含义。选择题用页面真实选项 token，不能自动包装成 HTML；多选是字符串。简答题可用 `plain:`，按段落转成转义后的 HTML。原始 HTML 也可直接作为值。`@` 开头的值会在保存/提交时上传对应本地文件。相对文件路径按进程当前工作目录解释，推荐始终使用绝对路径。
+示例题号和答案无实际含义，实际题号必须来自当前 `work.json`。
 
-空字符串或 `null` 会作为空答案写入，不会自动跳过。只操作确实要写入的题号，避免覆盖已存在答案。模板中未填写的键在暂存/交卷前要逐项核对。
+| 值 | 处理方式 |
+| --- | --- |
+| `"A"`、`"AB"` | 按原字符串发送；选择题使用页面真实选项 token |
+| `"plain:文字"` | 转为转义后的段落 HTML，适合纯文本简答 |
+| 原始 HTML 字符串 | 原样发送，需核对格式和内容 |
+| `"@绝对文件路径"` | 保存或提交时上传文件，再填入附件答案 |
+| `""` 或 `null` | 写入空答案，不会自动跳过 |
 
-## 写入与核对
+相对附件路径按进程当前工作目录解释，因此优先使用绝对路径。模板中没有填写的键在写入前逐项核对；只保留确实要写入的题号，避免覆盖已有答案。
 
-已获用户对具体内容及操作的授权后：
+## 暂存、回读与交卷
+
+只有用户授权了具体作业和对应内容后，才执行远端写入：
 
 ```text
-save --dohomework-url URL --work-json PATH/work.json --answers PATH/answers.json --out PATH/save-result.json
-verify --dohomework-url URL --work-json PATH/work.json
-submit --dohomework-url URL --work-json PATH/work.json --answers PATH/answers.json --out PATH/submit-result.json --confirm
+python "SKILL_DIR/scripts/xuexitong.py" save --dohomework-url "WORK_URL" --work-json "OUT_DIR/work.json" --answers "OUT_DIR/answers.json" --out "OUT_DIR/save-result.json"
+python "SKILL_DIR/scripts/xuexitong.py" verify --dohomework-url "WORK_URL" --work-json "OUT_DIR/work.json"
 ```
 
-`save` 暂存到学习通，会写入远端。`verify` 回读作答内容及附件信息，只读。`submit --confirm` 请求最终交卷；使用前核对所有目标题号、最终文字、附件版本和提交范围。`--confirm` 是 CLI 的操作约束，不能替代用户授权，也不要求在已有清晰授权时重复询问。
+`save` 写入学习通草稿；`verify` 只读服务器上存储的作答和附件信息，输出文本。暂存成功不等于已经交卷。
 
-附件可独立上传：`upload --dohomework-url URL --file ABSOLUTE_PATH`，返回 `objectId` 与答案 HTML；也可让 `@文件路径` 在 `save`/`submit` 中上传。不要两条路径都执行而重复上传。
+最终交卷还需核对作业、所有目标题号、最终文字和附件版本：
 
-脚本按题号读取当前隐藏字段后发送写请求，不自动重试 POST。成功响应只表示对应请求被接受；根据最终作业状态和回读结果判断是否已交卷。它没有事务性保证，跨题操作可能部分成功。保存或交卷中断时保留结果文件，明确哪些题号已成功、哪些结果不确定，然后回读核实。最终交卷可能让作答入口关闭，无法回读时用作业列表或用户的官方页面确认，不再次交卷试探。
+```text
+python "SKILL_DIR/scripts/xuexitong.py" submit --dohomework-url "WORK_URL" --work-json "OUT_DIR/work.json" --answers "OUT_DIR/answers.json" --out "OUT_DIR/submit-result.json" --confirm
+```
 
-原项目的上传、暂存与提交曾有实测；本次整理仅做离线验证，没有访问任何真实账户或提交真实作业。接口行为变化时以官方页面为准。
+`--confirm` 是 CLI 的操作约束，不替代用户授权。用户仅要求查看、生成草稿或暂存时，不执行交卷；已有清晰授权时也不必重复询问。
+
+## 单独上传附件
+
+```text
+python "SKILL_DIR/scripts/xuexitong.py" upload --dohomework-url "WORK_URL" --file "ABSOLUTE_FILE_PATH"
+```
+
+返回 `objectId` 和可写入答案的 HTML。可以使用这段 HTML，也可以直接在答案中用 `@文件路径`，由 `save` 或 `submit` 上传。两条路径择一，避免重复上传；单独上传不会自动把附件写入某道题的答案。
+
+## 结果不确定时
+
+客户端逐题读取当前隐藏字段后发送写请求，不自动重试或跟随写请求的重定向。跨题操作没有事务保证，前面的题可能成功、后面的题可能失败。
+
+超时、响应异常或被风控中断后，保留结果文件，区分已成功、明确失败和结果不确定的题号。先回读并结合官方页面确认，不用再次提交来试探。成功响应只代表对应请求被接受，应以最终作业状态判断是否交卷。
+
+最终交卷后作答入口可能关闭；无法回读时，可查询作业列表或由用户在官方页面确认。页面与接口可能变化，离线测试不能替代当前账户的在线结果。
