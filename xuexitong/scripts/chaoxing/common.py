@@ -2,6 +2,7 @@
 
 import html as html_lib
 import json
+import math
 import os
 import re
 import sys
@@ -137,14 +138,21 @@ def save_output(path, data):
 
 def fmt_size(v) -> str:
     """超星的 size 字段是 "11.30K" 这种人类可读格式, 保持一致。"""
-    if isinstance(v, str) and v and not v.isdigit():
-        return v
+    if isinstance(v, bool):
+        return ""
+    if isinstance(v, str):
+        formatted = re.fullmatch(
+            r"(\d+(?:\.\d+)?)\s*(?:[KMGTPEZY](?:I?B)?|B)", v.strip(), re.I
+        )
+        if formatted and math.isfinite(float(formatted.group(1))):
+            return v
     try:
         n = float(v)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return ""
-    for unit in ("", "K", "M", "G"):
-        if n < 1024:
+    if not math.isfinite(n) or n < 0:
+        return ""
+    for unit in ("", "K", "M", "G", "T", "P", "E", "Z", "Y"):
+        if n < 1024 or unit == "Y":
             return f"{n:.2f}{unit}" if unit else str(int(n))
         n /= 1024
-    return f"{n:.2f}G"

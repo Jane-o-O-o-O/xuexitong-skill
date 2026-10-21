@@ -52,6 +52,37 @@ class InputParsingTests(unittest.TestCase):
         self.assertIsNone(common._question_id('<input value="unknown" id="questionId">'))
 
 
+class SizeFormattingTests(unittest.TestCase):
+    def test_byte_sizes_keep_the_correct_unit_beyond_gigabytes(self):
+        for value, expected in (
+            (0, "0"),
+            (1023, "1023"),
+            (1024, "1.00K"),
+            (1024**2, "1.00M"),
+            (1024**3, "1.00G"),
+            (1024**4, "1.00T"),
+            (3 * 1024**5 // 2, "1.50P"),
+            (1024**8, "1.00Y"),
+            (1024**9, "1024.00Y"),
+            ("1099511627776", "1.00T"),
+        ):
+            with self.subTest(value=value):
+                self.assertEqual(common.fmt_size(value), expected)
+
+    def test_official_formatted_sizes_are_preserved(self):
+        for value in ("11.30K", "2.5 MB", "1GiB", "0B"):
+            with self.subTest(value=value):
+                self.assertEqual(common.fmt_size(value), value)
+
+    def test_invalid_negative_and_nonfinite_sizes_are_empty(self):
+        for value in (
+            None, object(), True, -1, "-1", "-2K", "", "unknown",
+            float("nan"), float("inf"), -float("inf"), "nan", "inf", "1e999", 10**1000,
+        ):
+            with self.subTest(value=value):
+                self.assertEqual(common.fmt_size(value), "")
+
+
 class AtomicOutputTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
