@@ -3,6 +3,7 @@
 import base64
 import binascii
 import json
+import math
 import os
 import re
 import time
@@ -155,7 +156,16 @@ def jwt_expiry(token: str):
     except (ValueError, UnicodeDecodeError, binascii.Error):
         return None
     exp = data.get("exp") if isinstance(data, dict) else None
-    return exp if isinstance(exp, (int, float)) and not isinstance(exp, bool) else None
+    if not isinstance(exp, (int, float)) or isinstance(exp, bool):
+        return None
+    try:
+        if not math.isfinite(exp):
+            return None
+        # A finite timestamp can still exceed the platform's supported time range.
+        time.localtime(exp)
+    except (OverflowError, ValueError, OSError):
+        return None
+    return exp
 
 
 def save_session(s: requests.Session, path: str = SESSION_FILE):

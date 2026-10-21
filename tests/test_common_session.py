@@ -204,6 +204,32 @@ class SessionTests(unittest.TestCase):
         self.assertIsNone(session.jwt_expiry("header.!.signature"))
         self.assertIsNone(session.jwt_expiry(None))
 
+    def test_jwt_expiry_rejects_nonfinite_and_unrepresentable_timestamps(self):
+        for expiry in (float("nan"), float("inf"), -float("inf"), 1e300, 10**1000):
+            with self.subTest(expiry=expiry):
+                payload = base64.urlsafe_b64encode(json.dumps({"exp": expiry}).encode()).decode()
+                self.assertIsNone(session.jwt_expiry(f"header.{payload}.signature"))
+        for expiry in (1_700_000_000, 1_700_000_000.5):
+            payload = base64.urlsafe_b64encode(json.dumps({"exp": expiry}).encode()).decode()
+            self.assertEqual(session.jwt_expiry(f"header.{payload}.signature"), expiry)
+
+    def test_jwt_expiry_handles_platform_localtime_errors(self):
+        payload = base64.urlsafe_b64encode(b'{"exp":1700000000}').decode()
+        for error in (OverflowError, ValueError, OSError):
+            with self.subTest(error=error), patch.object(session.time, "localtime", side_effect=error):
+                self.assertIsNone(session.jwt_expiry(f"header.{payload}.signature"))
+
+    def test_session_save_and_info_tolerate_unrepresentable_jwt_expiry(self):
+        payload = base64.urlsafe_b64encode(b'{"exp":1e300}').decode()
+        token = f"header.{payload}.signature"
+        client = session.new_session()
+        self.addCleanup(client.close)
+        client.cookies.set("p_auth_token", token, domain=".chaoxing.com", path="/")
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            session.save_session(client, self.path)
+            session.cmd_session_info(SimpleNamespace(session=self.path))
+        self.assertNotIn(token, output.getvalue())
+
     def test_check_uses_uid_and_never_logs_cookie_values(self):
         s = SimpleNamespace(
             get=Mock(return_value=SimpleNamespace(text="uid=123 我的课程")),
