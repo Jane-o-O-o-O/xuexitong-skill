@@ -153,6 +153,31 @@ class LocalPolicyTests(unittest.TestCase):
                 RequestPolicy(state, interval=0).before_request("https://i.chaoxing.com/base")
             sleep.assert_called_once_with(7.5)
 
+    def test_rate_limit_honors_seconds_and_http_dates_with_a_safe_minimum(self):
+        now = 1_700_000_000.25
+        for retry_after, expected in (
+            ("120", 120),
+            (" 120 ", 120),
+            ("Tue, 14 Nov 2023 22:15:20 GMT", 120),
+            ("Tue, 14 Nov 2023 22:15:20", 120),
+            ("Tue, 14 Nov 2023 22:13:00 GMT", 60),
+            ("0", 60),
+            ("not a date", 60),
+            ("²", 60),
+            ("9" * 400, 60),
+        ):
+            with self.subTest(retry_after=retry_after):
+                policy = RequestPolicy()
+                with (
+                    patch("chaoxing.local.time.time", return_value=now),
+                    self.assertRaises(RequestStopped),
+                ):
+                    policy.check_response(response(
+                        "https://i.chaoxing.com/base", 429,
+                        headers={"Retry-After": retry_after},
+                    ))
+                self.assertEqual(policy.state["pause_until"], now + expected)
+
     def test_query_budget_blocks_transport_and_is_shared_with_next_command(self):
         with tempfile.TemporaryDirectory() as directory:
             state = Path(directory) / "state.json"

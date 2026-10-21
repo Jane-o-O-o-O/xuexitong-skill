@@ -6,6 +6,8 @@ import re
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
+from datetime import timezone
+from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
@@ -100,6 +102,23 @@ def official_url(url):
         raise RequestStopped("仅允许访问学习通及其资料下载域名的 HTTPS 地址。")
 
 
+def _retry_after_cooldown(value):
+    """Honor both HTTP Retry-After formats while retaining the local minimum."""
+    try:
+        try:
+            seconds = int(value)
+        except (TypeError, ValueError):
+            retry_at = parsedate_to_datetime(value)
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=timezone.utc)
+            seconds = math.ceil(retry_at.timestamp() - time.time())
+        if math.isfinite(seconds):
+            return max(60, seconds)
+    except (TypeError, ValueError, OverflowError, OSError):
+        pass
+    return 60
+
+
 class RequestPolicy:
     def __init__(self, state_path=None, interval=MIN_REQUEST_INTERVAL, max_requests=None):
         self.path = Path(state_path) if state_path else None
@@ -175,7 +194,7 @@ class RequestPolicy:
             )
         if response.status_code == 429:
             retry_after = response.headers.get("Retry-After", "")
-            cooldown = max(60, int(retry_after)) if retry_after.isdigit() else 60
+            cooldown = _retry_after_cooldown(retry_after)
             self.stop(
                 f"学习通返回 HTTP 429，已在本地冷却 {cooldown} 秒。",
                 cooldown,
