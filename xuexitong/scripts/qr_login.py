@@ -27,6 +27,7 @@ import time
 import requests
 from chaoxing import session as cx
 from chaoxing.common import hidden_by_id, parse_inputs, write_json
+from chaoxing.diagnostics import safe_error_text
 from chaoxing.local import DATA_HOME, RequestStopped, local_runtime
 
 LOGIN_PAGE = "https://passport2.chaoxing.com/login?fid=-1&refer=https%3A%2F%2Fi.chaoxing.com"
@@ -119,7 +120,7 @@ def main(argv=None):
         log(str(error))
         return 3
     except (requests.RequestException, OSError, RuntimeError, ValueError) as error:
-        detail = f"{type(error).__name__}: {error}"
+        detail = f"{type(error).__name__}: {safe_error_text(error)}"
         write_status(state="error", error=detail)
         log(f"[x] 扫码登录失败: {detail}")
         return 1

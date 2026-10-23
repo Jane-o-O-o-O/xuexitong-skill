@@ -1,12 +1,14 @@
 """Command definitions and dispatch, without service logic."""
 
 import argparse
+import sys
 from pathlib import Path
 
 import requests
 
 from .common import die
 from .courses import cmd_chapters, cmd_courses, cmd_exams, cmd_topics
+from .diagnostics import NETWORK_TARGETS, cmd_network_info, safe_error_text
 from .homework import (
     cmd_download_attachments,
     cmd_fetch,
@@ -85,6 +87,8 @@ def build_parser():
     command("check", "检查登录态", cmd_check)
     command("session-info", "查看本地会话到期信息", cmd_session_info)
     command("request-status", "查看本地冷却和脱敏停止原因，不联网", cmd_request_status)
+    sp = command("network-info", "查看有效系统/环境代理，不联网或读取 Cookie", cmd_network_info)
+    sp.add_argument("--target", choices=tuple(NETWORK_TARGETS), default="upload")
     command("courses", "列出课程及其 ID", cmd_courses, out="")
 
     sp = command("works", "查询指定课程的作业及状态", cmd_works, out="")
@@ -208,7 +212,7 @@ def main(argv=None):
         if not args.course and not args.all_courses:
             parser.error("活动/考试扫描需要 --course 或 --all-courses")
     try:
-        if args.cmd in {"template", "session-info", "request-status"}:
+        if args.cmd in {"template", "session-info", "request-status", "network-info"}:
             args.handler(args)
         else:
             mutation_or_login = args.cmd in {
@@ -225,7 +229,8 @@ def main(argv=None):
     except RequestStopped as error:
         die(str(error), 3)
     except (requests.RequestException, OSError, ValueError, RuntimeError) as error:
-        die(f"{type(error).__name__}: {error}")
-    except KeyboardInterrupt:
+        die(f"{type(error).__name__}: {safe_error_text(error)}")
+    except KeyboardInterrupt as error:
+        print(f"[!] {safe_error_text(error)}", file=sys.stderr)
         return 130
     return 0

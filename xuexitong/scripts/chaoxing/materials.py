@@ -10,6 +10,7 @@ from urllib.parse import quote
 
 from .common import die, save_output, write_text
 from .courses import find_course
+from .diagnostics import safe_error_text
 from .local import RequestStopped
 from .session import load_session
 
@@ -242,7 +243,7 @@ def cmd_download(args):
         except RequestStopped:
             raise
         except Exception as e:
-            print(f"  [x] {safe}  {type(e).__name__}: {e}")
+            print(f"  [x] {safe}  {type(e).__name__}: {safe_error_text(e)}")
             fail += 1
         time.sleep(args.sleep)
     print(f"\n下载完成: 成功 {ok}  失败 {fail}  -> {os.path.abspath(args.out)}")

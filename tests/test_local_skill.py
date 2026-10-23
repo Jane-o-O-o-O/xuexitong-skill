@@ -368,8 +368,10 @@ class LocalPolicyTests(unittest.TestCase):
             session.new_session() as client,
             patch("requests.adapters.HTTPAdapter.send", return_value=redirect) as transport,
         ):
-            result = client.post(url, data={"answer": "A"})
-        self.assertEqual(result.status_code, 307)
+            with self.assertRaises(requests.HTTPError) as caught:
+                client.post(url, data={"answer": "A"})
+        self.assertEqual(caught.exception.diagnostic["httpStatus"], 307)
+        self.assertEqual(caught.exception.diagnostic["kind"], "http_redirect")
         self.assertEqual(transport.call_count, 1)
 
 

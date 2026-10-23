@@ -151,15 +151,20 @@ class QrTests(unittest.TestCase):
             qr_login.main(["--timeout", "0"])
 
     def test_request_failure_sets_error_status(self):
+        response = requests.Response()
+        response.status_code = 500
         with (
             patch.object(qr_login.cx, "new_session"),
-            patch.object(qr_login, "new_qr", side_effect=requests.HTTPError("HTTP 500")),
+            patch.object(
+                qr_login, "new_qr", side_effect=requests.HTTPError("PRIVATE", response=response)
+            ),
             patch.object(qr_login, "write_status") as status,
             redirect_stdout(io.StringIO()),
         ):
             self.assertEqual(qr_login.main([]), 1)
         self.assertEqual(status.call_args.kwargs["state"], "error")
         self.assertIn("HTTP 500", status.call_args.kwargs["error"])
+        self.assertNotIn("PRIVATE", status.call_args.kwargs["error"])
 
     def test_auth_response_must_be_an_object(self):
         client = unittest.mock.Mock()

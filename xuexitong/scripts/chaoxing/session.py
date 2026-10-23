@@ -12,7 +12,8 @@ from urllib.parse import urljoin, urlsplit, urlunsplit
 import requests
 
 from .common import die, read_json, write_json
-from .local import ACTIVE_POLICY, DATA_HOME, RequestPolicy, official_url
+from .diagnostics import annotate_error, request_context, safe_server_message
+from .local import ACTIVE_POLICY, DATA_HOME, RequestPolicy, RequestStopped, official_url
 
 try:
     from Crypto.Cipher import AES
@@ -65,8 +66,29 @@ class ChaoxingSession(requests.Session):
 
     def send(self, request, **kwargs):
         # send() also runs for every redirect, before any cookies leave this process.
-        self.policy.before_request(request.url)
-        return super().send(request, **kwargs)
+        try:
+            self.policy.before_request(request.url)
+        except (RequestStopped, KeyboardInterrupt) as error:
+            error.request_sent = False
+            raise
+        context = request_context(
+            request.method,
+            request.url,
+            timeout=kwargs.get("timeout"),
+            proxies=kwargs.get("proxies"),
+        )
+        started = time.monotonic()
+        try:
+            response = super().send(request, **kwargs)
+        except (requests.RequestException, KeyboardInterrupt) as error:
+            raise annotate_error(
+                error, context, self.policy, elapsed=time.monotonic() - started
+            ) from None
+        # A redirect's final response already has its own endpoint and timing.
+        if not hasattr(response, "chaoxing_context"):
+            response.chaoxing_context = context
+            response.chaoxing_elapsed = time.monotonic() - started
+        return response
 
     def guard_response(self, response, **kwargs):
         # Response hooks run before requests follows a redirect.
@@ -96,12 +118,24 @@ class ChaoxingSession(requests.Session):
         kwargs.setdefault("timeout", 30)
         if method.upper() not in {"GET", "HEAD", "OPTIONS"}:
             kwargs["allow_redirects"] = False
-        response = super().request(method, url, **kwargs)
+        response = None
         try:
+            response = super().request(method, url, **kwargs)
             response.raise_for_status()
-        except requests.HTTPError:
-            response.close()
-            raise
+            if (
+                method.upper() not in {"GET", "HEAD", "OPTIONS"}
+                and isinstance(response.status_code, int)
+                and 300 <= response.status_code < 400
+            ):
+                raise requests.HTTPError("Write redirect was not followed", response=response)
+        except requests.RequestException as error:
+            context = getattr(response, "chaoxing_context", None)
+            if not isinstance(context, dict):
+                context = request_context(method, url, timeout=kwargs.get("timeout"))
+            elapsed = getattr(response, "chaoxing_elapsed", None)
+            if response is not None:
+                response.close()
+            raise annotate_error(error, context, self.policy, elapsed=elapsed) from None
         return response
 
 
@@ -318,10 +352,12 @@ def do_login(phone: str, password: str) -> requests.Session:
     try:
         j = r.json()
     except ValueError:
-        die(f"登录响应非 JSON (可能触发风控/验证码): {r.text[:300]}")
+        die("登录响应不是 JSON，无法确认登录结果；请核对官方登录页面，非 JSON 本身不代表风控。")
+    if not isinstance(j, dict):
+        die("登录响应结构异常，无法确认登录结果；请核对官方登录页面。")
     if not j.get("status"):
-        die(f"登录失败: {j.get('msg')} | {json.dumps(j, ensure_ascii=False)[:300]}")
-    print(f"[+] 登录成功: {j.get('msg')}")
+        die(f"登录失败: {safe_server_message(j.get('msg'))}")
+    print(f"[+] 登录成功: {safe_server_message(j.get('msg'))}")
     return s
 
 
@@ -368,6 +404,7 @@ def cmd_request_status(args):
                     0, int(policy.state.get("pause_until", 0) - time.time())
                 ),
                 "lastStop": policy.state.get("last_stop"),
+                "lastNetworkError": policy.state.get("last_network_error"),
             },
             ensure_ascii=False,
             indent=2,
