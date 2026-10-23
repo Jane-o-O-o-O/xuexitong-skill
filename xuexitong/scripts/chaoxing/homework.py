@@ -3,8 +3,10 @@
 import base64
 import html as html_lib
 import json
+import mimetypes
 import os
 import re
+import sys
 import time
 from urllib.parse import parse_qs, quote, unquote, urlencode, urljoin, urlparse, urlunparse
 
@@ -25,10 +27,11 @@ from .common import (
     write_text,
 )
 from .courses import course_middle, find_course, list_courses
+from .diagnostics import safe_error_text, safe_server_message
 from .local import RequestStopped, official_url
 from .markup import parse_html
 from .materials import _safe_filename, download_file
-from .session import cookie_get, load_session
+from .session import load_session
 
 PENDING_WORDS = ("未交", "未提交", "待提交", "未开始", "去完成", "去提交")
 
@@ -553,12 +556,7 @@ def cmd_download_attachments(args):
                 result["error"] = "访问停止，未完成下载"
                 raise
             except (requests.RequestException, OSError, ValueError, RuntimeError) as error:
-                # Request exception messages can include signed URLs.
-                result["error"] = (
-                    type(error).__name__
-                    if isinstance(error, requests.RequestException)
-                    else str(error)
-                )
+                result["error"] = safe_error_text(error)
                 print(f"  [x] {attachment['name']}: {result['error']}")
     finally:
         if args.result_json:
@@ -656,32 +654,182 @@ def build_answer_html(oid: str, name: str, ext: str, resp=None) -> str:
     )
 
 
+class UploadError(RuntimeError):
+    def __init__(self, message, *, uncertain=False):
+        super().__init__(message)
+        self.upload_uncertain = uncertain
+
+
+def check_upload_file(path):
+    if not os.path.isfile(path):
+        raise FileNotFoundError("附件不存在或不是普通文件；尚未上传，请检查文件路径")
+    if not os.path.splitext(os.path.basename(path))[1].lstrip("."):
+        raise ValueError("附件缺少文件扩展名，平台可能无法识别；尚未上传，请先检查文件格式")
+    with open(path, "rb") as source:
+        if not source.read(1):
+            raise ValueError("附件为空文件；尚未上传，请先生成完整内容")
+
+
+def upload_uncertain(error):
+    diagnostic = getattr(error, "diagnostic", {})
+    if (
+        diagnostic.get("remoteOutcome") == "not_sent"
+        or getattr(error, "request_sent", None) is False
+    ):
+        return False
+    return getattr(error, "upload_uncertain", False) or getattr(error, "upload_attempted", False)
+
+
+def _post_upload(s, url, **kwargs):
+    try:
+        return s.post(url, **kwargs)
+    except (requests.RequestException, RequestStopped, KeyboardInterrupt) as error:
+        error.upload_attempted = True
+        raise
+
+
+def _upload_json(response):
+    try:
+        result = response.json()
+    except ValueError:
+        raise UploadError(
+            "上传响应不是 JSON，无法确认附件是否已保存；不要自动重传，先核对官方页面。"
+            "原始响应可能含鉴权信息，未写入错误提示。",
+            uncertain=True,
+        ) from None
+    if not isinstance(result, dict):
+        raise UploadError("上传响应结构异常，无法确认结果；先核对附件状态。", uncertain=True)
+    return result
+
+
+def _upload_context(page, *, pc=False):
+    fields = {
+        "uid": hidden_by_id(page, "userId" if pc else "uploadUid"),
+        "enc2": hidden_by_id(page, "uploadEnc"),
+        "t": hidden_by_id(page, "uploadTimeStamp" if pc else "currentTime"),
+    }
+    if not all(fields.values()):
+        raise UploadError(
+            "作业页面缺少上传所需的用户、签名或时间字段，尚未上传。"
+            "请核对同一份作业的入口、登录状态及页面是否改版；不会用本机时间替代服务端签名时间。"
+        )
+    return fields
+
+
+def _upload_object_id(result):
+    oid = result.get("objectId") or result.get("objectid")
+    if not isinstance(oid, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", oid):
+        raise UploadError("上传响应缺少有效的附件编号，结果未确认；不要自动重传。", uncertain=True)
+    return oid
+
+
 def upload_raw(s, do_url: str, path: str):
     """上传本地文件到超星, 返回 (原始响应 JSON, 文件名, 扩展名)。"""
-    if not os.path.exists(path):
-        raise FileNotFoundError(path)
+    check_upload_file(path)
     page = fetch_index(s, do_url, 0)
-    uid = hidden_by_id(page, "uploadUid") or cookie_get(s, "_uid") or ""
-    enc = hidden_by_id(page, "uploadEnc")
-    ts = hidden_by_id(page, "currentTime") or str(int(time.time() * 1000))
-    url = f"{UPLOAD_DOMAIN}/edit/uploadBase64?uid={uid}&enc2={enc}&t={ts}&uploadtype=work"
+    fields = _upload_context(page)
+    url = f"{UPLOAD_DOMAIN}/edit/uploadBase64?" + urlencode({**fields, "uploadtype": "work"})
     name = os.path.basename(path)
     ext = os.path.splitext(name)[1].lstrip(".").lower()
     with open(path, "rb") as fh:
-        resp = s.post(
+        resp = _post_upload(
+            s,
             url,
-            timeout=180,
+            timeout=(30, 180),
             data={"fileType": ext},
             files={"filePart": (name, fh, "application/octet-stream")},
             headers={"X-Requested-With": "XMLHttpRequest", "Referer": do_url},
         )
-    try:
-        j = resp.json()
-    except ValueError:
-        raise RuntimeError(f"上传响应非 JSON: {resp.text[:300]}") from None
-    if not j.get("status") or not (j.get("objectId") or j.get("objectid")):
-        raise RuntimeError(f"上传失败: {json.dumps(j, ensure_ascii=False)[:300]}")
+    j = _upload_json(resp)
+    if j.get("status") is False:
+        raise UploadError(
+            "服务端明确拒绝上传（status=false）；检查附件类型、大小和上传上下文后再处理。"
+        )
+    if j.get("status") is not True:
+        raise UploadError("上传响应没有明确成功状态；先核对附件，勿自动重传。", uncertain=True)
+    _upload_object_id(j)
     return j, name, ext
+
+
+def upload_pc_raw(s, pc_url: str, path: str):
+    """Explicit PC form support; never used as an automatic retry/fallback."""
+    check_upload_file(path)
+    if os.path.getsize(path) > 500 * 1024 * 1024:
+        raise ValueError("附件超过电脑端单文件 500 MB 限制；尚未上传，请先缩小文件")
+    official_url(pc_url)
+    parsed = urlparse(pc_url)
+    expected = {key.lower(): values[0] for key, values in parse_qs(parsed.query).items()}
+    ids = ("courseid", "classid", "workid")
+    if (
+        parsed.hostname != "mooc1.chaoxing.com"
+        or parsed.path not in {"/mooc-ans/mooc2/work/task", "/mooc-ans/mooc2/work/dowork"}
+        or any(not expected.get(key, "").isdigit() for key in ids)
+    ):
+        raise UploadError("电脑端上传需要作业列表提供的完整链接，且包含课程、班级和作业编号。")
+    response = s.get(pc_url, timeout=30)
+    current = {
+        key.lower(): values[0] for key, values in parse_qs(urlparse(response.url).query).items()
+    }
+    if any(current.get(key) != expected[key] for key in ids):
+        raise UploadError("电脑端页面跳转后课程、班级或作业不匹配，已停止，尚未上传。")
+    page = response.text
+    if not any(
+        re.fullmatch(r"answer\d+", node.attrs.get("name", ""))
+        for node in parse_html(page).walk("textarea")
+    ):
+        raise UploadError(
+            "电脑端页面没有可编辑的作答区域，作业可能已交、过期或入口关闭；尚未上传。"
+        )
+    if not re.search(
+        r'fileUrl\s*=\s*ServerHost\.uploadDomain\s*\+\s*["\']'
+        r'/ueditorupload/attachment\?uploadtype=work["\']',
+        page,
+    ):
+        raise UploadError("电脑端页面未找到已支持的附件表单；页面可能改版或入口已关闭，尚未上传。")
+    fields = _upload_context(page, pc=True)
+    name = os.path.basename(path)
+    ext = os.path.splitext(name)[1].lstrip(".").lower()
+    size = os.path.getsize(path)
+    mime = mimetypes.guess_type(name)[0] or "application/octet-stream"
+    url = f"{UPLOAD_DOMAIN}/ueditorupload/attachment?" + urlencode(
+        {"uploadtype": "work", "source": "1", **fields}
+    )
+    with open(path, "rb") as source:
+        result = _upload_json(
+            _post_upload(
+                s,
+                url,
+                timeout=(30, 180),
+                files={"upfile": (name, source, mime)},
+                data={"id": "WU_FILE_0", "name": name, "size": str(size), "type": mime},
+                headers={
+                    "Referer": response.url,
+                    "Origin": "https://mooc1.chaoxing.com",
+                    "Accept": "*/*",
+                },
+            )
+        )
+    if result.get("state") != "SUCCESS":
+        raise UploadError(
+            "电脑端上传没有返回 SUCCESS；附件状态未确认，请先核对官方页面。", uncertain=True
+        )
+    result_url = result.get("url")
+    if not isinstance(result_url, str):
+        raise UploadError("上传响应缺少附件地址，结果未确认。", uncertain=True)
+    result["objectId"] = parse_qs(urlparse(result_url).query).get("objectId", [""])[0]
+    _upload_object_id(result)
+    returned_type = result.get("fileType")
+    if (
+        result.get("original") != name
+        or str(result.get("size")) != str(size)
+        or not isinstance(returned_type, str)
+        or returned_type.lstrip(".").lower() != ext
+    ):
+        raise UploadError(
+            "服务器返回的文件名、大小或类型与本地文件不符；保留文件并核对，勿自动重传。",
+            uncertain=True,
+        )
+    return result, name, ext
 
 
 def upload_answer_file(s, do_url: str, path: str):
@@ -770,6 +918,19 @@ def collect_question_fields(s, do_url, wanted, work=None, max_index=40, sleep=0.
     return fields
 
 
+def _persist_write_results(path, results):
+    if not path:
+        return
+    try:
+        write_json(path, results)
+    except OSError:
+        accepted = [qid for qid, result in results.items() if result.get("status") is True]
+        raise RuntimeError(
+            f"本地作答结果文件写入失败；已收到服务端成功响应的题号: {accepted}。"
+            "该本地错误不撤销远端操作，请先回读答案及作业状态，勿重复提交。"
+        ) from None
+
+
 def do_save_or_submit(args, temp_save: bool):
     if not temp_save and not args.confirm:
         die("交卷需要显式确认: 加 --confirm")
@@ -780,6 +941,24 @@ def do_save_or_submit(args, temp_save: bool):
     if any(value is not None and not isinstance(value, str) for value in answers.values()):
         die("答案必须是字符串或 null；多选题请用 AB 这样的字符串")
     answers = {str(key): value or "" for key, value in answers.items()}
+    for qid, answer in answers.items():
+        if answer.startswith("@"):
+            try:
+                check_upload_file(answer[1:].strip())
+            except (OSError, ValueError) as error:
+                save_output(
+                    args.out,
+                    {
+                        qid: {
+                            "status": None,
+                            "stage": "prepare",
+                            "uncertain": False,
+                            "attachmentUncertain": False,
+                            "msg": safe_error_text(error),
+                        }
+                    },
+                )
+                die(f"题号 {qid} 的本地附件检查失败，尚未发送任何答案: {safe_error_text(error)}")
     work = read_json(args.work_json) if args.work_json and os.path.exists(args.work_json) else None
     s = load_session(args.session)
     qid_fields = collect_question_fields(
@@ -789,37 +968,70 @@ def do_save_or_submit(args, temp_save: bool):
     results = {}
     for qid, ans in answers.items():
         ans = format_answer(ans)
+        stage = "prepare"
+        attachment = None
         try:
             if ans.startswith("@"):
                 path = ans[1:].strip()
                 print(f"[UPLOAD] qid={qid} <- {path}")
+                stage = "upload"
                 oid, ans = upload_answer_file(s, args.dohomework_url, path)
+                attachment = {"objectId": oid, "html": ans}
                 print(f"         objectid={oid}  答案 HTML {len(ans)} 字符")
             payload = dict(qid_fields[qid])
             payload["tempSave"] = "true" if temp_save else "false"
             payload[f"answer{qid}"] = ans
+            stage = "save" if temp_save else "submit"
             resp = post_answer(s, payload, temp_save)
-        except RequestStopped as error:
-            results[qid] = {"status": None, "msg": str(error), "uncertain": True}
-            save_output(args.out, results)
-            raise
-        except (requests.RequestException, OSError, ValueError, RuntimeError) as error:
-            results[qid] = {"status": None, "msg": str(error), "uncertain": True}
-            save_output(args.out, results)
-            die(f"题号 {qid} 结果未确认，已停止；请用 verify 回读后再操作: {error}")
-        results[qid] = resp
+        except (
+            RequestStopped,
+            requests.RequestException,
+            OSError,
+            ValueError,
+            RuntimeError,
+            KeyboardInterrupt,
+        ) as error:
+            diagnostic = getattr(error, "diagnostic", None)
+            uncertain = (
+                stage in {"save", "submit"}
+                and (not diagnostic or diagnostic.get("remoteOutcome") != "not_sent")
+                and getattr(error, "request_sent", None) is not False
+            )
+            results[qid] = {
+                "status": None,
+                "msg": safe_error_text(error),
+                "stage": stage,
+                "uncertain": uncertain,
+                "attachmentUncertain": upload_uncertain(error),
+            }
+            if diagnostic:
+                results[qid]["diagnostic"] = diagnostic
+            if attachment:
+                results[qid]["uploadedAttachment"] = attachment
+            _persist_write_results(args.out, results)
+            if isinstance(error, (RequestStopped, KeyboardInterrupt)):
+                raise
+            hint = (
+                "请用 verify 回读后再操作"
+                if uncertain
+                else "本题答案尚未发送，请处理当前阶段的问题"
+            )
+            die(f"题号 {qid} 在 {stage} 阶段停止；{hint}: {safe_error_text(error)}")
+        results[qid] = {**resp, "uploadedAttachment": attachment} if attachment else resp
         print(
             f"[{'SAVE' if temp_save else 'SUBMIT'}] qid={qid} "
-            f"status={resp.get('status')} msg={resp.get('msg')}"
+            f"status={resp.get('status')} msg={safe_server_message(resp.get('msg'))}"
         )
         if resp.get("status") is not True:
-            save_output(args.out, results)
-            die(f"题号 {qid} 保存/提交失败，已停止: {resp.get('msg', '')}")
+            _persist_write_results(args.out, results)
+            die(f"题号 {qid} 保存/提交失败，已停止: {safe_server_message(resp.get('msg', ''))}")
         if args.out:
-            write_json(args.out, results)
+            _persist_write_results(args.out, results)
         time.sleep(args.sleep)
 
-    save_output(args.out, results)
+    _persist_write_results(args.out, results)
+    if args.out:
+        print(f"[+] 作答结果 -> {args.out}")
     return results
 
 
@@ -828,12 +1040,56 @@ def cmd_save_or_submit(args):
 
 
 def cmd_upload(args):
-    response, name, ext = upload_raw(load_session(args.session), args.dohomework_url, args.file)
-    oid = response.get("objectId") or response.get("objectid") or ""
-    print(
-        json.dumps(
-            {"raw": response, "objectId": oid, "html": build_answer_html(oid, name, ext, response)},
-            ensure_ascii=False,
-            indent=2,
+    out = getattr(args, "out", "")
+    if out and os.path.exists(out):
+        raise ValueError(
+            "上传结果文件已存在，请先检查已有附件记录；需要新的上传时使用新的输出路径。"
         )
-    )
+    if out and not os.path.isdir(os.path.dirname(os.path.abspath(out))):
+        raise ValueError("上传结果目录不存在，请先创建目录；尚未上传。")
+    try:
+        check_upload_file(args.file)
+        uploader = upload_pc_raw if getattr(args, "pc_work_url", None) else upload_raw
+        url = getattr(args, "pc_work_url", None) or args.dohomework_url
+        response, name, ext = uploader(load_session(args.session), url, args.file)
+    except (
+        RequestStopped,
+        requests.RequestException,
+        OSError,
+        ValueError,
+        RuntimeError,
+        KeyboardInterrupt,
+    ) as error:
+        if out:
+            result = {
+                "status": None,
+                "operation": "upload",
+                "uncertain": upload_uncertain(error),
+                "msg": safe_error_text(error),
+            }
+            if isinstance(getattr(error, "diagnostic", None), dict):
+                result["diagnostic"] = error.diagnostic
+            try:
+                write_json(out, result)
+            except OSError:
+                print("[!] 上传异常记录无法写入本地文件，请保留当前错误提示。", file=sys.stderr)
+        raise
+    oid = response.get("objectId") or response.get("objectid") or ""
+    result = {
+        "raw": response,
+        "objectId": oid,
+        "html": build_answer_html(oid, name, ext, response),
+        "name": name,
+        "status": True,
+    }
+    if out:
+        try:
+            write_json(out, result)
+        except OSError:
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            raise RuntimeError(
+                "附件已上传成功，但本地结果文件写入失败；请保留上面的附件记录，勿重复上传。"
+            ) from None
+        print(f"[+] 附件已上传，记录 -> {out}；尚未保存答案或交卷。")
+    else:
+        print(json.dumps(result, ensure_ascii=False, indent=2))

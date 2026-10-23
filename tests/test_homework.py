@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 from urllib.parse import parse_qs, urlparse
 
+import requests
 from chaoxing import courses, homework
 from chaoxing.common import read_json, write_json
 
@@ -145,6 +146,72 @@ class HomeworkSubmissionTests(unittest.TestCase):
         self.assertTrue(result["7001"]["status"])
         self.assertIsNone(result["7002"]["status"])
         self.assertTrue(result["7002"]["uncertain"])
+
+    def test_missing_local_file_stops_before_reading_or_writing_any_question(self):
+        write_json(
+            self.args.answers, {"7001": "@" + str(Path(self.args.out).parent / "missing.zip")}
+        )
+        with self.assertRaises(SystemExit):
+            homework.do_save_or_submit(self.args, False)
+        result = read_json(self.args.out)["7001"]
+        self.assertEqual(result["stage"], "prepare")
+        self.assertFalse(result["uncertain"])
+        self.fetch.assert_not_called()
+        self.post.assert_not_called()
+
+    def test_successful_attachment_is_preserved_when_submission_times_out(self):
+        file = Path(self.args.out).parent / "report.txt"
+        file.write_text("report", encoding="utf-8")
+        write_json(self.args.answers, {"7001": "@" + str(file)})
+        html = homework.build_answer_html("synthetic", file.name, "txt")
+        self.post.side_effect = requests.ReadTimeout("https://example.test/?enc=PRIVATE")
+        with patch.object(
+            homework, "upload_answer_file", return_value=("synthetic", html)
+        ) as upload:
+            with self.assertRaises(SystemExit):
+                homework.do_save_or_submit(self.args, False)
+        result = read_json(self.args.out)["7001"]
+        self.assertTrue(result["uncertain"])
+        self.assertEqual(result["stage"], "submit")
+        self.assertEqual(result["uploadedAttachment"], {"objectId": "synthetic", "html": html})
+        self.assertNotIn("PRIVATE", result["msg"])
+        upload.assert_called_once()
+        self.post.assert_called_once()
+
+    def test_upload_failure_does_not_claim_the_answer_was_sent(self):
+        file = Path(self.args.out).parent / "report.txt"
+        file.write_text("report", encoding="utf-8")
+        write_json(self.args.answers, {"7001": "@" + str(file)})
+        with patch.object(
+            homework,
+            "upload_answer_file",
+            side_effect=homework.UploadError("unknown", uncertain=True),
+        ):
+            with self.assertRaises(SystemExit):
+                homework.do_save_or_submit(self.args, False)
+        result = read_json(self.args.out)["7001"]
+        self.assertEqual(result["stage"], "upload")
+        self.assertFalse(result["uncertain"])
+        self.assertTrue(result["attachmentUncertain"])
+        self.post.assert_not_called()
+
+    def test_result_file_failure_reports_remote_success_and_stops_next_question(self):
+        with patch.object(homework, "write_json", side_effect=PermissionError("disk")):
+            with self.assertRaises(RuntimeError) as caught:
+                homework.do_save_or_submit(self.args, False)
+        self.assertIn("7001", str(caught.exception))
+        self.post.assert_called_once()
+
+    def test_interrupt_records_prior_success_and_uncertain_current_question(self):
+        self.post.side_effect = [{"status": True}, KeyboardInterrupt()]
+        with self.assertRaises(KeyboardInterrupt):
+            homework.do_save_or_submit(self.args, False)
+        result = read_json(self.args.out)
+        self.assertTrue(result["7001"]["status"])
+        self.assertTrue(result["7002"]["uncertain"])
+        self.assertEqual(result["7002"]["stage"], "submit")
+        self.assertNotIn("7003", result)
+        self.assertEqual(self.post.call_count, 2)
 
 
 class HomeworkParsingTests(unittest.TestCase):
