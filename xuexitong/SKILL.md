@@ -52,6 +52,8 @@ python "SKILL_DIR/scripts/xuexitong.py" --help
 
 用不联网的 `request-status` 查看本地剩余冷却和脱敏原因。`source: local` 是本地查询预算，无需重新登录或官方验证；`page_heuristic` 是页面可见提示识别，`redirect` 是官方验证跳转，`http` 是状态码。本地暂停不等于 App 无法访问或账号被封禁。隐藏弹窗、脚本和注释中的验证文案不触发识别。接口调用仍可能遇到真正的验证，不能承诺永不触发。
 
+上传或网络异常时读 [异常排查](references/troubleshooting.md)。`network-info` 不联网，可查看包含 Windows 系统代理在内的有效代理配置；`request-status.lastNetworkError` 保留脱敏的历史异常。超时本身不能证明风控或代理故障。上传优先指定 `--out` 留存附件记录，后续暂存失败时复用成功上传的 HTML；不要自动换接口重传或自动转为浏览器操作。
+
 ## 凭据与结果解释
 
 - Cookie 是本地明文凭据，不读入模型上下文、不粘贴到对话或提交到仓库。扫码优先；浏览器导入用 `set-cookie --cookie-file ABSOLUTE_PATH`。备用密码登录可省略 `--password`，让用户在本地交互终端隐式输入。

@@ -20,7 +20,8 @@ python "SKILL_DIR/scripts/xuexitong.py" materials --help
 | 扫码登录 | `qr-login --timeout 150` | 展示实际二维码图片，保持进程运行，等待 App 确认 |
 | 检查登录 | `check` | 请求官方个人页，查看 `loggedIn` |
 | 本地到期信息 | `session-info` | 不发网络请求，不打印 Cookie 值 |
-| 本地请求诊断 | `request-status` | 不联网；输出冷却剩余秒数、停止原因、来源、HTTP 状态及去掉鉴权参数的路径 |
+| 本地请求诊断 | `request-status` | 不联网；输出冷却、停止原因和脱敏历史网络异常，历史异常不代表当前仍失败 |
+| 本地代理诊断 | `network-info --target upload` | 不联网、不读取 Cookie；目标可选 `upload`、`course`、`login`，包含系统代理的有效配置 |
 | 浏览器 Cookie 导入 | `set-cookie --cookie-file ABSOLUTE_PATH` | 从本地文本文件读取，不把凭据放进命令行 |
 | 备用密码登录 | `login --phone PHONE` | 不传 `--password`，由用户在本地交互终端隐式输入 |
 

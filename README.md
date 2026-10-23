@@ -4,7 +4,7 @@
 
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/downloads/)
 [![Agent Skill](https://img.shields.io/badge/Agent-Skill-167D72)](xuexitong/SKILL.md)
-[![CLI](https://img.shields.io/badge/CLI-28_commands-555555)](xuexitong/references/queries.md)
+[![CLI](https://img.shields.io/badge/CLI-29_commands-555555)](xuexitong/references/queries.md)
 
 把超星学习通的课程、作业、课表和资料接入你正在使用的 Agent。扫码登录后，可以直接用自然语言查询未交作业、查找课件、整理学习信息，也可以在明确授权后上传附件、暂存或提交作答。
 
@@ -170,6 +170,15 @@ HTTP 401/403 也可能来自登录、权限或接口上下文，不统一称为�
 </details>
 
 <details>
+<summary><strong>上传超时了，是风控吗？还能直接重试吗？</strong></summary>
+
+超时本身不能证明风控，也不能证明远端写入没有生效。错误提示会区分连接超时、读取超时、代理、TLS 和 HTTP 错误，并说明操作阶段。用不联网的 `request-status` 查看历史异常，`network-info --target upload` 查看有效代理；Windows 系统代理即使没有环境变量也可能参与请求，TUN/VPN 则不一定出现在此结果中。
+
+上传建议指定 `--out` 保存附件编号和 HTML。后续暂存或交卷失败时，可以复用已经上传的附件；先回读答案和作业状态，不自动重传或交卷。电脑端附件表单通过 `upload --pc-work-url` 显式选择。完整说明见 [异常排查](xuexitong/references/troubleshooting.md)。
+
+</details>
+
+<details>
 <summary><strong>为什么目录、题量或查询结果可能不完整？</strong></summary>
 
 资料目录当前不自动翻页，递归有深度上限，抓题也有页数上限。页面改版、课程权限和部分接口失败同样可能影响结果。请检查结果中的错误与未展开标记；详细限制见查询和作业文档。
@@ -184,7 +193,7 @@ xuexitong/
   agents/openai.yaml       技能展示信息
   references/              按需读取的查询和作业说明
   scripts/
-    xuexitong.py            CLI 入口，支持 28 个子命令
+    xuexitong.py            CLI 入口，支持 29 个子命令
     qr_login.py             扫码登录
     chaoxing/              会话、课程、作业、资料和学习信息
     chaoxing_hw.py          历史 Python 导入兼容层
