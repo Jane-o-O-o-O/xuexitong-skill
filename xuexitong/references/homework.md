@@ -40,7 +40,7 @@ python "SKILL_DIR/scripts/xuexitong.py" fetch --dohomework-url "WORK_URL" --star
 python "SKILL_DIR/scripts/xuexitong.py" download-attachments --work-json "OUT_DIR/work.json" --out "OUT_DIR/files" --result-json "OUT_DIR/downloads.json"
 ```
 
-默认只接受一个附件；有多个时用 `--object-id OBJECT_ID` 选择，`--question-id QID` 可进一步限定题号。只有用户明确需要批量下载时才加 `--all-files`，仍受每条查询 8 个请求的预算限制，已成功的对象 ID 不要重复下载。命令只下载题干附件，不上传或修改作答。它按官方电脑端预览流程读取 `/mooc-ans/ueditorupload/read`，只使用预览页提供的对应文件下载链接，不探测其他对象接口。没有下载链接时报告限制。
+默认只接受一个附件；有多个时用 `--object-id OBJECT_ID` 选择，`--question-id QID` 可进一步限定题号。只有用户明确需要批量下载时才加 `--all-files`，仍受每条查询 8 个请求的预算限制，已成功的对象 ID 不要重复下载。命令只下载题干附件，不上传或修改作答。它按官方电脑端预览流程读取 `/mooc-ans/ueditorupload/read`，支持预览网页中的下载链接，也支持 TXT 等文件直接返回的下载跳转。预览与下载都保留官方网盘来源请求头，原样复用服务端签名，不提前下载同一文件再重新请求。只沿官方入口解析所选附件，跳转中的附件编号不符、来源域名不受支持、循环或过多跳转时停止，不探测其他对象接口。没有下载链接时报告限制。
 
 文件名含题号及对象 ID，下载完整后原子替换。HTML/JSON 错误页、空文件或已声明长度不符不会覆盖旧文件。检查结果清单的 `success`、`failed`、`total` 和每个文件的 `bytes`；遇到验证会立即停止并保留已完成记录。签名链接不写入结果清单。
 

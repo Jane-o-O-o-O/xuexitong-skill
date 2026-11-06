@@ -52,6 +52,8 @@ class AttachmentTests(unittest.TestCase):
     def test_download_link_comes_from_matching_official_preview_anchor(self):
         client = Mock()
         client.get.return_value = SimpleNamespace(
+            status_code=200,
+            close=Mock(),
             url="https://mooc1.chaoxing.com/mooc-ans/ueditorupload/read",
             text='<a href="https://d0.cldisk.com/download/object?token=synthetic&amp;v=1">下载</a>'
             '<a href="https://d0.cldisk.com/download/other">其他</a>',
@@ -63,10 +65,110 @@ class AttachmentTests(unittest.TestCase):
         query = client.get.call_args.args[0]
         self.assertIn("/mooc-ans/ueditorupload/read?", query)
         self.assertNotIn("/ananas/status/", query)
+        self.assertFalse(client.get.call_args.kwargs["allow_redirects"])
+        self.assertEqual(
+            client.get.call_args.kwargs["headers"]["Referer"], "https://pan-yz.chaoxing.com/"
+        )
+
+    def test_direct_txt_redirect_preserves_signature_without_downloading_twice(self):
+        client = Mock()
+        signed = (
+            "https://d0.cldisk.com/download/object?at_=123&ak_=synthetic"
+            "&fn=%E5%AE%9E%E9%AA%8C%20%281%29.txt&repeat=a&repeat=b"
+        )
+        response = SimpleNamespace(
+            status_code=302,
+            headers={"Location": signed},
+            url="https://mooc1.chaoxing.com/mooc-ans/ueditorupload/read",
+            close=Mock(),
+        )
+        client.get.return_value = response
+        actual = homework.attachment_download_url(
+            client, {"objectId": "object", "name": "实验 (1).txt"}
+        )
+        self.assertEqual(actual, signed)
+        self.assertEqual(client.get.call_count, 1)
+        self.assertFalse(client.get.call_args.kwargs["allow_redirects"])
+        response.close.assert_called_once()
+
+    def test_preview_redirect_can_reach_html_with_relative_download_anchor(self):
+        client = Mock()
+        responses = [
+            SimpleNamespace(
+                status_code=302,
+                headers={"Location": "https://d0.cldisk.com/preview/object"},
+                url="https://mooc1.chaoxing.com/mooc-ans/ueditorupload/read",
+                close=Mock(),
+            ),
+            SimpleNamespace(
+                status_code=200,
+                url="https://d0.cldisk.com/preview/object",
+                text='<a href="/download/object?token=synthetic&amp;v=1">下载</a>',
+                close=Mock(),
+            ),
+        ]
+        client.get.side_effect = responses
+        actual = homework.attachment_download_url(
+            client, {"objectId": "object", "name": "a.docx"}
+        )
+        self.assertEqual(actual, "https://d0.cldisk.com/download/object?token=synthetic&v=1")
+        self.assertEqual(client.get.call_count, 2)
+        for response in responses:
+            response.close.assert_called_once()
+
+    def test_untrusted_or_mismatched_redirect_is_not_requested(self):
+        for target, error in [
+            ("https://evil.invalid/download/object", RequestStopped),
+            ("http://d0.cldisk.com/download/object", RequestStopped),
+            ("https://d0.cldisk.com/download/other", ValueError),
+        ]:
+            with self.subTest(target=target):
+                client = Mock()
+                response = SimpleNamespace(
+                    status_code=302,
+                    headers={"Location": target},
+                    url="https://mooc1.chaoxing.com/mooc-ans/ueditorupload/read",
+                    close=Mock(),
+                )
+                client.get.return_value = response
+                with self.assertRaises(error):
+                    homework.attachment_download_url(
+                        client, {"objectId": "object", "name": "a.txt"}
+                    )
+                self.assertEqual(client.get.call_count, 1)
+                response.close.assert_called_once()
+
+    def test_missing_looping_and_excessive_redirects_stop(self):
+        for locations, count in [
+            ([None], 1),
+            (["/mooc-ans/ueditorupload/read?objectId=obj&fileOriName=a.txt"], 1),
+            ([f"/preview/{i}" for i in range(5)], 4),
+        ]:
+            with self.subTest(locations=locations):
+                client = Mock()
+                responses = [
+                    SimpleNamespace(
+                        status_code=302,
+                        headers={"Location": location} if location else {},
+                        url="https://mooc1.chaoxing.com/mooc-ans/ueditorupload/read",
+                        close=Mock(),
+                    )
+                    for location in locations
+                ]
+                client.get.side_effect = responses
+                with self.assertRaises(ValueError):
+                    homework.attachment_download_url(
+                        client, {"objectId": "obj", "name": "a.txt"}
+                    )
+                self.assertEqual(client.get.call_count, count)
+                for response in responses[:count]:
+                    response.close.assert_called_once()
 
     def test_no_download_link_does_not_probe_alternative_endpoints(self):
         client = Mock()
         client.get.return_value = SimpleNamespace(
+            status_code=200,
+            close=Mock(),
             url="https://mooc1.chaoxing.com/mooc-ans/ueditorupload/read", text="不允许下载"
         )
         with self.assertRaises(ValueError):
@@ -76,6 +178,8 @@ class AttachmentTests(unittest.TestCase):
     def test_external_download_anchor_is_rejected(self):
         client = Mock()
         client.get.return_value = SimpleNamespace(
+            status_code=200,
+            close=Mock(),
             url="https://mooc1.chaoxing.com/mooc-ans/ueditorupload/read",
             text='<a href="https://evil.invalid/download/obj">下载</a>',
         )

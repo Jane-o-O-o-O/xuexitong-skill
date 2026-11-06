@@ -8,6 +8,7 @@ import os
 import re
 import sys
 import time
+from contextlib import closing
 from urllib.parse import parse_qs, quote, unquote, urlencode, urljoin, urlparse, urlunparse
 
 import requests
@@ -495,7 +496,7 @@ def cmd_template(args):
 
 
 def attachment_download_url(s, attachment):
-    """Follow the PC preview widget's observed objectId -> download anchor flow."""
+    """Resolve an official preview anchor or a direct signed-file redirect."""
     oid = attachment["objectId"]
     if not isinstance(oid, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", oid):
         raise ValueError("无效附件 objectId")
@@ -505,17 +506,47 @@ def attachment_download_url(s, attachment):
             "fileOriName": attachment["name"],
         }
     )
-    response = s.get(preview, timeout=30)
-    links = set()
-    for anchor in parse_html(response.text).walk("a"):
-        href = urljoin(response.url, anchor.attrs.get("href") or "")
-        path = urlparse(href).path.rstrip("/")
-        if path == f"/download/{oid}":
-            official_url(href)
-            links.add(href)
-    if len(links) != 1:
-        raise ValueError("官方预览页未提供唯一的附件下载链接；可能不允许下载或页面结构已变化")
-    return links.pop()
+    expected_path = f"/download/{oid}"
+    current, seen = preview, {preview}
+    # TXT previews can return a signed download directly. Resolve the redirect
+    # without fetching the file here, and retain the signature verbatim.
+    for _ in range(4):
+        with closing(
+            s.get(
+                current,
+                timeout=30,
+                allow_redirects=False,
+                headers={"Referer": "https://pan-yz.chaoxing.com/"},
+            )
+        ) as response:
+            if response.status_code in {301, 302, 303, 307, 308}:
+                location = response.headers.get("Location")
+                if not location:
+                    raise ValueError("官方预览入口返回跳转但没有下载地址")
+                target = urljoin(response.url, location)
+                official_url(target)
+                target_path = urlparse(target).path.rstrip("/")
+                if target_path == expected_path:
+                    return target
+                if target_path.startswith("/download/"):
+                    raise ValueError("官方预览跳转中的附件编号与所选附件不符")
+                if target in seen:
+                    raise ValueError("官方预览入口返回循环跳转，已停止")
+                seen.add(target)
+                current = target
+                continue
+            links = set()
+            for anchor in parse_html(response.text).walk("a"):
+                href = urljoin(response.url, anchor.attrs.get("href") or "")
+                if urlparse(href).path.rstrip("/") == expected_path:
+                    official_url(href)
+                    links.add(href)
+            if len(links) != 1:
+                raise ValueError(
+                    "官方预览页未提供唯一的附件下载链接；可能不允许下载或页面结构已变化"
+                )
+            return links.pop()
+    raise ValueError("官方预览跳转过多，已停止；请在官方页面核对附件入口")
 
 
 def cmd_download_attachments(args):

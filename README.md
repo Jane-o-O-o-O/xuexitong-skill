@@ -114,6 +114,8 @@ New-Item -ItemType Directory -Force .\outputs | Out-Null
 & $python $cx materials --help
 ```
 
+题干附件下载支持预览页下载按钮，以及 TXT 等文件的直接下载跳转；自动保留官方来源请求头和原始签名，无需手工换接口。
+
 需要解析结果时，读取 `--out` 导出的 JSON；标准输出可能同时包含日志。自动化调用建议使用绝对路径，避免宿主工作目录变化影响文件位置。`--session` 和 `--sleep` 等全局参数放在子命令之前。
 
 更多参数见 [查询与下载](xuexitong/references/queries.md)。读取题目、生成答案、上传、暂存及交卷见 [作业操作](xuexitong/references/homework.md)。
